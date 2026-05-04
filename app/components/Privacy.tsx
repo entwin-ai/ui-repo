@@ -7,7 +7,7 @@ export default function Privacy() {
         <div className={styles.privacyText}>
           <h3>Privacy First</h3>
           <p>
-            For high-net-worth individuals, privacy isn't optional—it's essential. Entwin operates with bank-level security protocols.
+            For high-net-worth individuals, privacy isn&apos;t optional—it&apos;s essential. Entwin operates with bank-level security protocols.
           </p>
           <p>
             Your data never leaves your infrastructure. We support on-premise hosting and offer complete transparency into how your AI concierge operates.
