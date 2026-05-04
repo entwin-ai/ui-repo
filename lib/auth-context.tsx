@@ -31,11 +31,24 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const prevStatus = useRef(status)
 
   useEffect(() => {
+    // Alert whenever the status changes
+    if (prevStatus.current !== status) {
+      alert(`Session status changed from ${prevStatus.current} to ${status}`)
+    }
+
     if (
       prevStatus.current !== 'authenticated' &&
       status === 'authenticated' &&
       session?.user?.name
     ) {
+      // Alert with the full session object for debugging
+      alert(
+        `Authentication successful. Session data: ${JSON.stringify(
+          session,
+          null,
+          2
+        )}`
+      )
       setIsWelcomePopupOpen(true)
     }
     prevStatus.current = status

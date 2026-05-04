@@ -15,6 +15,7 @@ export default function AuthModal({ isOpen, onClose }: AuthModalProps) {
   if (!isOpen) return null
 
   const handleProviderSelect = async (provider: 'google' | 'outlook') => {
+    alert(`Attempting to sign in with: ${provider}`)
     setIsLoading(true)
     // Map 'outlook' to 'azure-ad' for the NextAuth backend
     const providerId = provider === 'outlook' ? 'azure-ad' : provider
