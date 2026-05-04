@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
-import { useAuth } from '@/app/lib/auth-context'
+import { signIn } from 'next-auth/react'
 import styles from './AuthModal.module.css'
 
 interface AuthModalProps {
@@ -10,14 +10,15 @@ interface AuthModalProps {
 }
 
 export default function AuthModal({ isOpen, onClose }: AuthModalProps) {
-  const { signIn } = useAuth()
   const [isLoading, setIsLoading] = useState(false)
 
   if (!isOpen) return null
 
   const handleProviderSelect = async (provider: 'google' | 'outlook') => {
     setIsLoading(true)
-    signIn(provider)
+    // Map 'outlook' to 'azure-ad' for the NextAuth backend
+    const providerId = provider === 'outlook' ? 'azure-ad' : provider
+    signIn(providerId)
   }
 
   return (
