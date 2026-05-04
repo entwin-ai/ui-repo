@@ -1,0 +1,36 @@
+.privacy {
+  padding: 6rem 5%;
+  background: linear-gradient(135deg, rgba(32, 178, 170, 0.15), var(--light-turquoise));
+}
+
+.privacyContent {
+  max-width: 900px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  align-items: center;
+}
+
+.privacyText h3 {
+  font-size: 2rem;
+  margin-bottom: 1rem;
+  color: var(--text-dark);
+}
+
+.privacyText p {
+  color: var(--text-light);
+  line-height: 1.9;
+  margin-bottom: 1rem;
+}
+
+.privacyIcon {
+  font-size: 4rem;
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .privacyContent {
+    grid-template-columns: 1fr;
+  }
+}

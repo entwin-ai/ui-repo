@@ -1,0 +1,36 @@
+:root {
+  --primary-turquoise: #20B2AA;
+  --light-turquoise: #E0F7F6;
+  --dark-turquoise: #0D9488;
+  --text-dark: #1F2937;
+  --text-light: #6B7280;
+  --white: #FFFFFF;
+  --light-gray: #F9FAFB;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  line-height: 1.6;
+  color: var(--text-dark);
+  overflow-x: hidden;
+  background-color: var(--white);
+}
+
+button {
+  font-family: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
