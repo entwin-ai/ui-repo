@@ -8,8 +8,11 @@ import {
   PropsWithChildren,
   useState,
   useCallback,
+  useEffect,
+  useRef,
 } from 'react'
 import AuthModal from '@/app/components/AuthModal'
+import WelcomePopup from '@/app/components/WelcomePopup'
 
 interface AuthContextType {
   session: Session | null
@@ -24,6 +27,19 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export function AuthProvider({ children }: PropsWithChildren) {
   const { data: session, status } = useSession()
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isWelcomePopupOpen, setIsWelcomePopupOpen] = useState(false)
+  const prevStatus = useRef(status)
+
+  useEffect(() => {
+    if (
+      prevStatus.current !== 'authenticated' &&
+      status === 'authenticated' &&
+      session?.user?.name
+    ) {
+      setIsWelcomePopupOpen(true)
+    }
+    prevStatus.current = status
+  }, [status, session])
 
   const handleSignIn = useCallback((provider: 'google' | 'outlook') => {
     if (provider === 'outlook') {
@@ -45,6 +61,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
     setIsModalOpen(false)
   }, [])
 
+  const closeWelcomePopup = useCallback(() => {
+    setIsWelcomePopupOpen(false)
+  }, [])
+
   return (
     <AuthContext.Provider
       value={{
@@ -57,6 +77,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
     >
       {children}
       <AuthModal isOpen={isModalOpen} onClose={closeModal} />
+      <WelcomePopup
+        isOpen={isWelcomePopupOpen}
+        onClose={closeWelcomePopup}
+        userName={session?.user?.name || ''}
+      />
     </AuthContext.Provider>
   )
 }
