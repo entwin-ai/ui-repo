@@ -25,6 +25,18 @@ const authOptions = {
   session: {
     strategy: 'jwt' as const,
   },
+  cookies: {
+    sessionToken: {
+      name: `__Secure-next-auth.session-token`,
+      options: {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: true,
+        domain: '.entwin.ai',
+      },
+    },
+  },
   secret: process.env.NEXTAUTH_SECRET,
 }
 
