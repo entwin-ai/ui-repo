@@ -15,7 +15,7 @@ export default function AuthModal({ isOpen, onClose }: AuthModalProps) {
 
   if (!isOpen) return null
 
-  const handleProviderSelect = async (provider: 'google' | 'outlook') => {
+  const handleProviderSelect = async (provider: 'google' | 'azure-ad') => {
     setIsLoading(true)
     signIn(provider)
   }
@@ -50,7 +50,7 @@ export default function AuthModal({ isOpen, onClose }: AuthModalProps) {
 
           <button
             className={`${styles.authButton} ${styles.microsoft}`}
-            onClick={() => handleProviderSelect('outlook')}
+            onClick={() => handleProviderSelect('azure-ad')}
             disabled={isLoading}
           >
             <svg

@@ -1,0 +1,70 @@
+'use client'
+
+import { Session } from 'next-auth'
+import { SessionProvider, signIn, signOut, useSession } from 'next-auth/react'
+import {
+  createContext,
+  useContext,
+  PropsWithChildren,
+  useState,
+  useCallback,
+} from 'react'
+import AuthModal from '@/app/components/AuthModal'
+
+interface AuthContextType {
+  session: Session | null
+  status: 'authenticated' | 'loading' | 'unauthenticated'
+  signIn: (provider: 'google' | 'azure-ad') => void
+  signOut: () => void
+  showAuthModal: () => void
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined)
+
+export function AuthProvider({ children }: PropsWithChildren) {
+  const { data: session, status } = useSession()
+  const [isModalOpen, setIsModalOpen] = useState(false)
+
+  const handleSignIn = useCallback((provider: 'google' | 'azure-ad') => {
+    signIn(provider)
+  }, [])
+
+  const handleSignOut = useCallback(() => {
+    signOut()
+  }, [])
+
+  const showAuthModal = useCallback(() => {
+    setIsModalOpen(true)
+  }, [])
+
+  const closeModal = useCallback(() => {
+    setIsModalOpen(false)
+  }, [])
+
+  return (
+    <AuthContext.Provider
+      value={{
+        session,
+        status,
+        signIn: handleSignIn,
+        signOut: handleSignOut,
+        showAuthModal,
+      }}
+    >
+      {children}
+      <AuthModal isOpen={isModalOpen} onClose={closeModal} />
+    </AuthContext.Provider>
+  )
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext)
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider')
+  }
+  return context
+}
+
+export function NextAuthProvider({ children }: PropsWithChildren) {
+  return <SessionProvider>{children}</SessionProvider>
+}
