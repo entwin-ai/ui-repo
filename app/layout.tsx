@@ -1,6 +1,6 @@
+import { Providers } from './providers'
 import type { Metadata } from 'next'
 import './globals.css'
-import { AuthProvider, NextAuthProvider } from '@/lib/auth-context'
 
 export const metadata: Metadata = {
   title: 'Entwin - Your Personal AI Concierge',
@@ -16,9 +16,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <NextAuthProvider>
-          <AuthProvider>{children}</AuthProvider>
-        </NextAuthProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   )
