@@ -14,7 +14,7 @@ import AuthModal from '@/app/components/AuthModal'
 interface AuthContextType {
   session: Session | null
   status: 'authenticated' | 'loading' | 'unauthenticated'
-  signIn: (provider: 'google' | 'azure-ad') => void
+  signIn: (provider: 'google' | 'outlook') => void
   signOut: () => void
   showAuthModal: () => void
 }
@@ -25,8 +25,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const { data: session, status } = useSession()
   const [isModalOpen, setIsModalOpen] = useState(false)
 
-  const handleSignIn = useCallback((provider: 'google' | 'azure-ad') => {
-    signIn(provider)
+  const handleSignIn = useCallback((provider: 'google' | 'outlook') => {
+    if (provider === 'outlook') {
+      signIn('azure-ad')
+    } else {
+      signIn(provider)
+    }
   }, [])
 
   const handleSignOut = useCallback(() => {
