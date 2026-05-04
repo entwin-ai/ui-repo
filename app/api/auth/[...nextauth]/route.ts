@@ -1,4 +1,5 @@
-import NextAuth from 'next-auth'
+import NextAuth, { Account, Session } from 'next-auth'
+import { JWT } from 'next-auth/jwt'
 import GoogleProvider from 'next-auth/providers/google'
 import AzureADProvider from 'next-auth/providers/azure-ad'
 
@@ -21,16 +22,17 @@ const authOptions = {
     }),
   ],
   callbacks: {
-    async jwt({ token, account }) {
+    async jwt({ token, account }: { token: JWT; account: Account | null }) {
       if (account) {
         token.accessToken = account.access_token
       }
       return token
     },
-    async session({ session, token }: any) {
-      session.accessToken = token.accessToken
+    async session({ session, token }: { session: Session; token: JWT }) {
+      // Pass token info to the session
+      ;(session as any).accessToken = token.accessToken
       if (session?.user) {
-        session.user.id = token.sub
+        ;(session.user as any).id = token.sub
       }
       return session
     },
