@@ -4,7 +4,7 @@ import { useAuth } from '@/lib/auth-context'
 import styles from './Navigation.module.css'
 
 export default function Navigation() {
-  const { session, status, showAuthModal } = useAuth()
+  const { session, status, showAuthModal, signOut } = useAuth()
   const userName = session?.user?.name?.split(' ')[0]
 
   return (
@@ -23,7 +23,13 @@ export default function Navigation() {
         <li>
           <a href="#pricing">Pricing</a>
         </li>
-        {status !== 'authenticated' && (
+        {status === 'authenticated' ? (
+          <li>
+            <button onClick={() => signOut()} className={styles.ctaButton}>
+              Sign Out
+            </button>
+          </li>
+        ) : (
           <li>
             <button onClick={showAuthModal} className={styles.ctaButton}>
               Sign Up / Sign In
