@@ -23,6 +23,7 @@
  */
 
 import makeWASocket, {
+  Browsers,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
@@ -97,7 +98,7 @@ function resolveDataRoot(): string {
 }
 
 const DATA_ROOT: string = g.__entwinWaDataRoot ?? (g.__entwinWaDataRoot = resolveDataRoot())
-const logger = pino({ level: 'silent' })
+const logger = pino({ level: process.env.WA_LOG_LEVEL || 'silent' })
 
 function userKey(email: string): string {
   return crypto.createHash('sha256').update(email.toLowerCase()).digest('hex').slice(0, 16)
@@ -255,7 +256,10 @@ export async function connect(email: string, phone: string): Promise<{ state: Wa
     printQRInTerminal: false,
     markOnlineOnConnect: false, // stay passive: don't affect the user's presence
     syncFullHistory: true, // ask the phone for as much history as it will give
-    browser: ['Entwin', 'Desktop', '2.0.0'],
+    // MUST be a recognized platform preset: WhatsApp rejects pairing-code
+    // logins from custom browser identities and closes the connection.
+    // macOS/'Desktop' also yields the fullest chat-history sync.
+    browser: Browsers.macOS('Desktop'),
   })
   s.sock = sock
   s.state = 'pairing'
@@ -353,11 +357,13 @@ function requestPairingCodeWhenReady(sock: WASocket, digits: string): Promise<st
             )
           )
       } else if (u.connection === 'close') {
+        const code = (u.lastDisconnect?.error as any)?.output?.statusCode
         finish(() =>
           reject(
             new Error(
-              'WhatsApp closed the connection before pairing. This is usually transient — try again. ' +
-                'If it repeats: make sure the app runs under a persistent Node process (not serverless) and that no other tool is using the same session.'
+              `WhatsApp closed the connection before pairing (status ${code ?? 'unknown'}). ` +
+                'This is usually transient — try again. If it repeats: run under a persistent Node process (not serverless), ' +
+                'set WA_LOG_LEVEL=debug for details, and make sure no other tool is using the same session.'
             )
           )
         )
