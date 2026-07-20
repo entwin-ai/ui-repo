@@ -18,7 +18,7 @@ interface Connector {
 const INITIAL_CONNECTORS: Connector[] = [
   { id: 'gmail', code: 'GM', name: 'Gmail', desc: 'Email ingestion for the vault.', connected: true, hasSync: true },
   { id: 'gcal', code: 'GC', name: 'Google Calendar', desc: 'Meeting and scheduling context.', connected: false, hasSync: false },
-  { id: 'whatsapp', code: 'WA', name: 'WhatsApp', desc: 'Personal messages, facet-decomposed.', connected: false, hasSync: false },
+  { id: 'whatsapp', code: 'WA', name: 'WhatsApp', desc: 'Personal messages, facet-decomposed. Links as a companion device to your number.', connected: false, hasSync: true },
   { id: 'slack', code: 'SL', name: 'Slack', desc: 'Work channel ingestion.', connected: false, hasSync: false },
 ]
 
@@ -77,6 +77,19 @@ function LoginScreen() {
   )
 }
 
+interface WaStatus {
+  state: 'disconnected' | 'pairing' | 'connected'
+  phone?: string
+  pairingCode?: string
+  pollEnabled: boolean
+  pendingMessages: number
+  totalMessages: number
+  lastSync: number | null
+  error?: string
+}
+
+const WA_IDLE: WaStatus = { state: 'disconnected', pollEnabled: true, pendingMessages: 0, totalMessages: 0, lastSync: null }
+
 /* ---------------- Post-login app (layout from the screenshot) ---------------- */
 function AppShell() {
   const { data: session } = useSession()
@@ -91,6 +104,110 @@ function AppShell() {
   ])
   const [chatInput, setChatInput] = useState('')
   const menuWrapRef = useRef<HTMLDivElement>(null)
+
+  // ---- WhatsApp connector state ----
+  const [wa, setWa] = useState<WaStatus>(WA_IDLE)
+  const [waModalOpen, setWaModalOpen] = useState(false)
+  const [waPhone, setWaPhone] = useState('')
+  const [waBusy, setWaBusy] = useState(false)
+  const [waError, setWaError] = useState('')
+  const [waSyncFeedback, setWaSyncFeedback] = useState('')
+
+  const refreshWa = async () => {
+    try {
+      const res = await fetch('/api/whatsapp/status')
+      if (res.ok) setWa(await res.json())
+    } catch {
+      /* server not reachable — leave last known state */
+    }
+  }
+
+  // Poll status: every 3s while pairing, every 30s while connected
+  useEffect(() => {
+    refreshWa()
+    const fast = wa.state === 'pairing' || waModalOpen
+    const t = setInterval(refreshWa, fast ? 3000 : 30000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wa.state, waModalOpen])
+
+  // Mirror server state into the connector card + auto-close modal on success
+  useEffect(() => {
+    setConnectors((prev) =>
+      prev.map((c) => (c.id === 'whatsapp' ? { ...c, connected: wa.state === 'connected' } : c))
+    )
+    if (wa.state === 'connected' && waModalOpen) {
+      setTimeout(() => setWaModalOpen(false), 1200)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wa.state])
+
+  const waConnect = async () => {
+    setWaBusy(true)
+    setWaError('')
+    try {
+      const res = await fetch('/api/whatsapp/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: waPhone }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Connection failed')
+      setWa((w) => ({ ...w, state: data.state, pairingCode: data.pairingCode, phone: waPhone }))
+    } catch (e) {
+      setWaError((e as Error).message)
+    } finally {
+      setWaBusy(false)
+    }
+  }
+
+  const waDisconnect = async () => {
+    setWaBusy(true)
+    try {
+      const res = await fetch('/api/whatsapp/disconnect', { method: 'POST' })
+      if (res.ok) setWa(await res.json())
+    } finally {
+      setWaBusy(false)
+    }
+  }
+
+  const waSyncNow = async () => {
+    setWaSyncFeedback('Syncing…')
+    try {
+      const res = await fetch('/api/whatsapp/sync', { method: 'POST' })
+      const data = await res.json()
+      if (res.ok) {
+        setWa(data)
+        setWaSyncFeedback(`Synced ${data.written} new message${data.written === 1 ? '' : 's'}`)
+      } else {
+        setWaSyncFeedback(data.error || 'Sync failed')
+      }
+    } catch {
+      setWaSyncFeedback('Sync failed')
+    }
+    setTimeout(() => setWaSyncFeedback(''), 3000)
+  }
+
+  const waTogglePoll = async (enabled: boolean) => {
+    setWa((w) => ({ ...w, pollEnabled: enabled }))
+    try {
+      const res = await fetch('/api/whatsapp/poll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      })
+      if (res.ok) setWa(await res.json())
+    } catch {}
+  }
+
+  const fmtLastSync = (ts: number | null) => {
+    if (!ts) return 'Never synced'
+    const mins = Math.round((Date.now() - ts) / 60000)
+    if (mins < 1) return 'Synced just now'
+    if (mins === 1) return 'Synced 1 min ago'
+    if (mins < 60) return `Synced ${mins} min ago`
+    return `Synced at ${new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+  }
 
   const user = session?.user
   const name = user?.name || user?.email || 'Signed in'
@@ -113,6 +230,15 @@ function AppShell() {
   }, [])
 
   const toggleConnector = (id: string) => {
+    if (id === 'whatsapp') {
+      if (wa.state === 'connected') {
+        waDisconnect()
+      } else {
+        setWaError('')
+        setWaModalOpen(true)
+      }
+      return
+    }
     setConnectors((prev) => prev.map((c) => (c.id === id ? { ...c, connected: !c.connected } : c)))
   }
 
@@ -305,7 +431,7 @@ function AppShell() {
                       </button>
                     )}
                   </div>
-                  {c.hasSync && c.connected && (
+                  {c.id === 'gmail' && c.connected && (
                     <div className="connector-sync">
                       <button className="sync-now-btn" onClick={syncNow} disabled={syncFeedback === 'Syncing…'}>
                         Sync now
@@ -319,6 +445,38 @@ function AppShell() {
                         Poll every <span className="poll-interval">15 min</span>
                       </label>
                       <div className="sync-feedback">{syncFeedback}</div>
+                    </div>
+                  )}
+                  {c.id === 'whatsapp' && wa.state === 'connected' && (
+                    <div className="connector-sync">
+                      <div className="wa-meta">
+                        <span className="wa-phone">+{wa.phone}</span>
+                        <span className="wa-counts">
+                          {wa.totalMessages.toLocaleString()} messages · {wa.pendingMessages} pending
+                        </span>
+                      </div>
+                      <button className="sync-now-btn" onClick={waSyncNow} disabled={waSyncFeedback === 'Syncing…'}>
+                        Sync now
+                      </button>
+                      <label className="poll-row">
+                        <input
+                          type="checkbox"
+                          checked={wa.pollEnabled}
+                          onChange={(e) => waTogglePoll(e.target.checked)}
+                        />
+                        Poll every <span className="poll-interval">15 min</span>
+                      </label>
+                      <div className="sync-feedback">{waSyncFeedback || fmtLastSync(wa.lastSync)}</div>
+                    </div>
+                  )}
+                  {c.id === 'whatsapp' && wa.state === 'pairing' && !waModalOpen && (
+                    <div className="connector-sync">
+                      <div className="sync-feedback">
+                        Pairing in progress —{' '}
+                        <button className="wa-link-btn" onClick={() => setWaModalOpen(true)}>
+                          show code
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -388,6 +546,59 @@ function AppShell() {
           </div>
         </div>
       </div>
+
+      {/* ---- WhatsApp pairing modal ---- */}
+      {waModalOpen && (
+        <div className="wa-modal-backdrop" onClick={() => !waBusy && setWaModalOpen(false)}>
+          <div className="wa-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="wa-modal-title">Connect WhatsApp</div>
+
+            {wa.state === 'connected' ? (
+              <div className="wa-modal-body">
+                <div className="wa-success">✓ WhatsApp linked. History sync has started.</div>
+              </div>
+            ) : wa.pairingCode ? (
+              <div className="wa-modal-body">
+                <div className="wa-modal-sub">
+                  On your phone, open <b>WhatsApp → Settings → Linked devices → Link a device → Link with phone
+                  number instead</b>, then enter this code:
+                </div>
+                <div className="wa-pairing-code">{wa.pairingCode}</div>
+                <div className="wa-modal-note">
+                  Waiting for you to confirm on your phone… this screen updates automatically. After linking,
+                  Entwin receives your chat history and new messages, and syncs them into your vault every 15
+                  minutes.
+                </div>
+              </div>
+            ) : (
+              <div className="wa-modal-body">
+                <div className="wa-modal-sub">
+                  Enter your WhatsApp mobile number (with country code). Entwin will link to your account as a
+                  companion device — like WhatsApp Web — so it can read your chats. You approve the link on your
+                  phone and can revoke it any time from Linked devices.
+                </div>
+                <input
+                  className="wa-phone-input"
+                  type="tel"
+                  placeholder="+1 312 555 1234"
+                  value={waPhone}
+                  onChange={(e) => setWaPhone(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !waBusy && waConnect()}
+                  autoFocus
+                />
+                {waError && <div className="wa-error">{waError}</div>}
+                <button className="connect-btn wa-modal-connect" onClick={waConnect} disabled={waBusy || !waPhone.trim()}>
+                  {waBusy ? 'Requesting pairing code…' : 'Get pairing code'}
+                </button>
+              </div>
+            )}
+
+            <button className="wa-modal-close" onClick={() => setWaModalOpen(false)} disabled={waBusy}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
