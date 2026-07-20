@@ -1,111 +1,63 @@
-# Entwin - Your Personal AI Concierge
+# Entwin — Frontend v2 (Google sign-in + Connectors)
 
-A modern, responsive homepage for Entwin, built with Next.js and TypeScript.
+A stripped-down Next.js app with exactly one flow:
 
-## Features
+1. **Login screen** (from `entwin_frontend_v2.html`) with a **Continue with Google** button.
+2. Clicking it redirects to the **real Google sign-in screen** (OAuth via NextAuth, basic scopes: `openid email profile`).
+3. After successful authentication, the app shows the **Connectors page** — sidebar (New chat, Dashboard, Chat, Connectors, Entwin's Memory), header, and the four connector cards (Gmail connected with *Sync now* + *Poll every 15 min*; Google Calendar, WhatsApp, Slack not connected). The design-notes panel and screenshot annotations are not included.
 
-- 🤖 AI Concierge Service
-- 📅 Smart Scheduling & Email Automation
-- 🎯 Priority Management
-- 🛡️ Enterprise Privacy & Security
-- 💎 Premium Design with Light Turquoise Theme
-- 📱 Fully Responsive (Mobile, Tablet, Desktop)
+The signed-in user's Google name, email, and avatar appear at the bottom of the sidebar, with a **Sign out** menu.
 
-## Project Structure
+## Setup
 
-```
-entwin/
-├── app/
-│   ├── components/
-│   │   ├── Navigation.tsx
-│   │   ├── Hero.tsx
-│   │   ├── Features.tsx
-│   │   ├── ValueProposition.tsx
-│   │   ├── Privacy.tsx
-│   │   ├── Pricing.tsx
-│   │   ├── CTA.tsx
-│   │   ├── Footer.tsx
-│   │   └── *.module.css
-│   ├── globals.css
-│   ├── layout.tsx
-│   └── page.tsx
-├── package.json
-├── tsconfig.json
-├── next.config.js
-└── .gitignore
-```
+### 1. Google OAuth credentials
 
-## Getting Started
+1. Go to [Google Cloud Console → APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials).
+2. Create an **OAuth client ID** → Application type: **Web application**.
+3. Add authorized redirect URI: `http://localhost:3000/api/auth/callback/google`
+4. Copy the Client ID and Client Secret.
 
-### Prerequisites
+### 2. Environment
 
-- Node.js 18+ 
-- npm or yarn
-
-### Installation
-
-1. Clone the repository:
 ```bash
-cd entwin
+cp .env.local.example .env.local
 ```
 
-2. Install dependencies:
+Fill in:
+
+```
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET=$(openssl rand -base64 32)
+```
+
+### 3. Run
+
 ```bash
 npm install
-# or
-yarn install
-```
-
-3. Run the development server:
-```bash
 npm run dev
-# or
-yarn dev
 ```
 
-4. Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000 — you'll see the sign-in screen. Click **Continue with Google**, complete Google's consent screen, and you'll land on the Connectors page.
 
-## Build for Production
+## Project structure
 
-```bash
-npm run build
-npm run start
+```
+app/
+  api/auth/[...nextauth]/route.ts   # NextAuth — Google provider only, basic scopes
+  layout.tsx                        # Root layout
+  providers.tsx                     # SessionProvider
+  globals.css                       # Styles ported from entwin_frontend_v2.html
+  logo.ts                           # Embedded Entwin logo
+  page.tsx                          # Login screen + post-login app shell
 ```
 
-## Color Scheme
+## What was removed from the original repo
 
-- **Primary Turquoise**: #20B2AA
-- **Light Turquoise**: #E0F7F6
-- **Dark Turquoise**: #0D9488
-- **Text Dark**: #1F2937
-- **Text Light**: #6B7280
-
-## Key Sections
-
-- **Navigation**: Sticky header with smooth navigation links
-- **Hero**: Eye-catching headline with CTA buttons
-- **Features**: 6 powerful features in a responsive grid
-- **Value Proposition**: Benefits for high-net-worth professionals
-- **Privacy**: Enterprise-grade security messaging
-- **Pricing**: $1,000/month professional plan
-- **CTA**: Final call-to-action section
-- **Footer**: Multi-column footer with links
-
-## Customization
-
-All styling is done with CSS Modules, making it easy to customize:
-- Edit `app/components/*.module.css` for component styles
-- Edit `app/globals.css` for global styles
-- Update color variables in CSS files
-
-## Deployment
-
-This project can be deployed on:
-- Vercel (recommended for Next.js)
-- Netlify
-- AWS Amplify
-- Any Node.js hosting provider
-
-## License
-
-All rights reserved © 2026 Entwin
+- Marketing landing page components (Hero, Features, Pricing, CTA, Footer, Navigation, Privacy, ValueProposition, WelcomePopup, AuthModal) and their CSS modules
+- Microsoft / Azure AD sign-in (provider + `/api/auth/microsoft` route)
+- Custom JWT auth routes (`/api/auth/google`, `/api/auth/session`, `/api/auth/logout`) — NextAuth handles all of this
+- `lib/auth-context.tsx` custom auth context
+- Unused dependencies: `axios`, `bcryptjs`, `jsonwebtoken`, `@types/jsonwebtoken`
+- Stray `index.html`, old auth docs

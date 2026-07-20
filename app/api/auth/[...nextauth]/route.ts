@@ -1,24 +1,18 @@
 import NextAuth, { Account, Session } from 'next-auth'
 import { JWT } from 'next-auth/jwt'
 import GoogleProvider from 'next-auth/providers/google'
-import AzureADProvider from 'next-auth/providers/azure-ad'
 
 const authOptions = {
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID as string,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+      // Basic authentication only: identity + email + profile picture
       authorization: {
         params: {
-          scope:
-            'openid email profile https://www.googleapis.com/auth/gmail.readonly',
+          scope: 'openid email profile',
         },
       },
-    }),
-    AzureADProvider({
-      clientId: process.env.AZURE_AD_CLIENT_ID as string,
-      clientSecret: process.env.AZURE_AD_CLIENT_SECRET as string,
-      tenantId: process.env.AZURE_AD_TENANT_ID as string,
     }),
   ],
   callbacks: {
@@ -29,7 +23,6 @@ const authOptions = {
       return token
     },
     async session({ session, token }: { session: Session; token: JWT }) {
-      // Pass token info to the session
       ;(session as any).accessToken = token.accessToken
       if (session?.user) {
         ;(session.user as any).id = token.sub
@@ -39,17 +32,6 @@ const authOptions = {
   },
   session: {
     strategy: 'jwt' as const,
-  },
-  cookies: {
-    sessionToken: {
-      name: `next-auth.session-token`,
-      options: {
-        httpOnly: true,
-        sameSite: 'lax',
-        path: '/',
-        secure: true,
-      },
-    },
   },
   secret: process.env.NEXTAUTH_SECRET,
 }

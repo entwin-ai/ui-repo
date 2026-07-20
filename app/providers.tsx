@@ -1,12 +1,8 @@
 'use client'
 
-import { AuthProvider, NextAuthProvider } from '@/lib/auth-context'
+import { SessionProvider } from 'next-auth/react'
 import { PropsWithChildren } from 'react'
 
 export function Providers({ children }: PropsWithChildren) {
-  return (
-    <NextAuthProvider>
-      <AuthProvider>{children}</AuthProvider>
-    </NextAuthProvider>
-  )
+  return <SessionProvider>{children}</SessionProvider>
 }

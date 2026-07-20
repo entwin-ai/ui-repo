@@ -1,7 +1,7 @@
 {
   "name": "entwin",
-  "version": "1.0.0",
-  "description": "Your Personal AI Concierge Service",
+  "version": "2.0.0",
+  "description": "Entwin — sign in with Google, then manage vault connectors",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -10,10 +10,6 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@types/jsonwebtoken": "^9.0.10",
-    "axios": "^1.16.0",
-    "bcryptjs": "^3.0.3",
-    "jsonwebtoken": "^9.0.3",
     "next": "^14.0.0",
     "next-auth": "^4.24.14",
     "react": "^18.2.0",
