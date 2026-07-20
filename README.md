@@ -105,3 +105,16 @@ All routes require a signed-in NextAuth session; state is keyed per user email.
   reconnects without re-pairing — just hit Connect again with the same number).
 - For production, move the service out of Next.js API routes into a long-running
   worker so the socket and 15-minute timer aren't tied to the web process.
+
+### Deployment note (important)
+
+On serverless hosts (Vercel, AWS Lambda) the app directory (`/var/task`) is **read-only**;
+the service now falls back to `ENTWIN_DATA_DIR` (set this env var if you have a writable
+mount) or the OS temp dir. That fixes the `ENOENT ... mkdir` crash, **but the connector
+still can't run properly on serverless**: the Baileys websocket and the 15-minute timer
+need a long-lived process, and serverless functions are killed seconds after responding —
+before the user finishes entering the pairing code, and temp storage is wiped between
+invocations. Deploy on a host with a persistent Node process instead: local `next start`,
+a VPS, Railway/Render/Fly.io, a Docker container, or (per the roadmap) inside the Entwin
+desktop app — or keep the frontend on Vercel and run the WhatsApp service as a separate
+long-running worker the API routes proxy to.

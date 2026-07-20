@@ -34,6 +34,7 @@ import pino from 'pino'
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
+import os from 'os'
 
 export const SYNC_INTERVAL_MS = 15 * 60 * 1000 // 15 minutes
 
@@ -69,7 +70,33 @@ const g = globalThis as any
 if (!g.__entwinWaSessions) g.__entwinWaSessions = new Map<string, UserSession>()
 const sessions: Map<string, UserSession> = g.__entwinWaSessions
 
-const DATA_ROOT = path.join(process.cwd(), '.entwin-data')
+/**
+ * Resolve a writable data root. Serverless platforms (Vercel/Lambda) mount the
+ * app at a read-only path like /var/task, so we probe candidates in order:
+ *   1. ENTWIN_DATA_DIR env var (recommended for any real deployment)
+ *   2. <cwd>/.entwin-data (local dev / self-hosted `next start`)
+ *   3. <os tmpdir>/entwin-data (last resort — EPHEMERAL: wiped between
+ *      serverless invocations, so pairing state will not survive)
+ */
+function resolveDataRoot(): string {
+  const candidates = [
+    process.env.ENTWIN_DATA_DIR,
+    path.join(process.cwd(), '.entwin-data'),
+    path.join(os.tmpdir(), 'entwin-data'),
+  ].filter(Boolean) as string[]
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      fs.accessSync(dir, fs.constants.W_OK)
+      return dir
+    } catch {
+      /* try next candidate */
+    }
+  }
+  throw new Error('No writable data directory found — set ENTWIN_DATA_DIR to a writable path')
+}
+
+const DATA_ROOT: string = g.__entwinWaDataRoot ?? (g.__entwinWaDataRoot = resolveDataRoot())
 const logger = pino({ level: 'silent' })
 
 function userKey(email: string): string {
