@@ -221,7 +221,31 @@ export async function connect(email: string, phone: string): Promise<{ state: Wa
   s.lastError = undefined
   s.stopping = false
 
-  const { state: authState, saveCreds } = await useMultiFileAuthState(authDir(key))
+  // Tear down any half-open socket from a previous attempt
+  if (s.sock) {
+    try {
+      s.sock.end(undefined)
+    } catch {}
+    s.sock = undefined
+  }
+
+  // If a previous pairing attempt failed partway, the auth dir holds
+  // unregistered/corrupt creds that make WhatsApp close the connection.
+  // Wipe it so we start a clean pairing. (Registered creds are kept —
+  // that's how we resume after a server restart without re-pairing.)
+  const dir = authDir(key)
+  const credsFile = path.join(dir, 'creds.json')
+  let previouslyRegistered = false
+  if (fs.existsSync(credsFile)) {
+    try {
+      previouslyRegistered = !!JSON.parse(fs.readFileSync(credsFile, 'utf8'))?.registered
+    } catch {}
+  }
+  if (!previouslyRegistered) {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+
+  const { state: authState, saveCreds } = await useMultiFileAuthState(dir)
   const { version } = await fetchLatestBaileysVersion()
 
   const sock = makeWASocket({
@@ -246,16 +270,24 @@ export async function connect(email: string, phone: string): Promise<{ state: Wa
       startPollTimer(email)
     } else if (connection === 'close') {
       const code = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode
+      const registered = !!authState.creds.registered
       if (s.stopping || code === DisconnectReason.loggedOut) {
         s.state = 'disconnected'
         s.sock = undefined
-      } else {
-        // transient drop — reconnect with saved creds
+      } else if (registered) {
+        // transient drop (incl. the restart WhatsApp requires right after
+        // pairing) — reconnect with saved creds
         s.state = 'pairing'
         connect(email, digits).catch((e) => {
           s.lastError = (e as Error).message
           s.state = 'disconnected'
         })
+      } else {
+        // closed before pairing completed — do NOT auto-retry (avoids a
+        // reconnect loop); surface it and let the user hit Connect again
+        s.state = 'disconnected'
+        s.sock = undefined
+        s.lastError = `Connection closed before pairing (code ${code ?? 'unknown'})`
       }
     }
   })
@@ -265,14 +297,73 @@ export async function connect(email: string, phone: string): Promise<{ state: Wa
   // Live messages (incoming and the user's own outgoing)
   sock.ev.on('messages.upsert', ({ messages }) => ingest(s, messages))
 
-  // If this device isn't registered yet, ask for a pairing code
+  // If this device isn't registered yet, request a pairing code — but only
+  // once the socket signals it's ready (first QR event), not on a timer.
   if (!authState.creds.registered) {
-    await new Promise((r) => setTimeout(r, 2500)) // let the socket settle
-    const code = await sock.requestPairingCode(digits)
+    const code = await requestPairingCodeWhenReady(sock, digits).catch((e) => {
+      s.state = 'disconnected'
+      s.lastError = (e as Error).message
+      throw e
+    })
     s.pairingCode = code.match(/.{1,4}/g)?.join('-') ?? code
   }
 
   return { state: s.state, pairingCode: s.pairingCode }
+}
+
+/**
+ * Wait until the socket has finished its handshake (signalled by the first
+ * QR event) before asking WhatsApp for a pairing code. Calling earlier is
+ * the classic cause of "Connection Closed".
+ */
+function requestPairingCodeWhenReady(sock: WASocket, digits: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let settled = false
+    const finish = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn()
+    }
+    const timer = setTimeout(
+      () =>
+        finish(() =>
+          reject(
+            new Error(
+              'Timed out reaching WhatsApp. Check that this server has direct outbound access to web.whatsapp.com (port 443/websockets) and try again.'
+            )
+          )
+        ),
+      30_000
+    )
+    sock.ev.on('connection.update', (u) => {
+      if (u.qr) {
+        // handshake done — safe to request the code now
+        sock
+          .requestPairingCode(digits)
+          .then((code) => finish(() => resolve(code)))
+          .catch((e) =>
+            finish(() =>
+              reject(
+                new Error(
+                  `WhatsApp rejected the pairing request: ${(e as Error).message}. ` +
+                    'Verify the number is digits-only with country code (e.g. 13125551234) and is an active WhatsApp account, then try again.'
+                )
+              )
+            )
+          )
+      } else if (u.connection === 'close') {
+        finish(() =>
+          reject(
+            new Error(
+              'WhatsApp closed the connection before pairing. This is usually transient — try again. ' +
+                'If it repeats: make sure the app runs under a persistent Node process (not serverless) and that no other tool is using the same session.'
+            )
+          )
+        )
+      }
+    })
+  })
 }
 
 export async function disconnect(email: string): Promise<void> {
