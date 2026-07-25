@@ -20,6 +20,7 @@ const INITIAL_CONNECTORS: Connector[] = [
   { id: 'gcal', code: 'GC', name: 'Google Calendar', desc: 'Meeting and scheduling context.', connected: false, hasSync: false },
   { id: 'whatsapp', code: 'WA', name: 'WhatsApp', desc: 'Personal messages, facet-decomposed. Links as a companion device to your number.', connected: false, hasSync: true },
   { id: 'slack', code: 'SL', name: 'Slack', desc: 'Work channel ingestion.', connected: false, hasSync: false },
+  { id: 'anime', code: 'AM', name: 'Anime Maker', desc: 'Turn a story into an AI-generated movie. Upload a .txt story to begin.', connected: false, hasSync: false },
 ]
 
 const GoogleG = () => (
@@ -112,6 +113,53 @@ function AppShell() {
   const [waBusy, setWaBusy] = useState(false)
   const [waError, setWaError] = useState('')
   const [waSyncFeedback, setWaSyncFeedback] = useState('')
+
+  // ---- Anime Maker connector state ----
+  const [animeModalOpen, setAnimeModalOpen] = useState(false)
+  const [animeFile, setAnimeFile] = useState<File | null>(null)
+  const [animeBusy, setAnimeBusy] = useState(false)
+  const [animeError, setAnimeError] = useState('')
+  const [animeDone, setAnimeDone] = useState('')
+  const animeFileInputRef = useRef<HTMLInputElement>(null)
+
+  const onAnimeBrowse = () => {
+    setAnimeError('')
+    animeFileInputRef.current?.click()
+  }
+
+  const onAnimeFilePicked = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] ?? null
+    if (f && !f.name.toLowerCase().endsWith('.txt')) {
+      setAnimeError('Please choose a .txt file.')
+      setAnimeFile(null)
+      return
+    }
+    setAnimeError('')
+    setAnimeFile(f)
+  }
+
+  const onAnimeUpload = async () => {
+    if (!animeFile) {
+      setAnimeError('Choose a .txt file first.')
+      return
+    }
+    setAnimeBusy(true)
+    setAnimeError('')
+    setAnimeDone('')
+    try {
+      const body = new FormData()
+      body.append('story', animeFile)
+      const res = await fetch('/api/anime/upload', { method: 'POST', body })
+      if (!res.ok) throw new Error(`Upload failed (${res.status})`)
+      setAnimeDone('✓ Story uploaded. Your movie will be emailed when ready.')
+      setConnectors((prev) => prev.map((c) => (c.id === 'anime' ? { ...c, connected: true } : c)))
+      setTimeout(() => setAnimeModalOpen(false), 1600)
+    } catch (err: any) {
+      setAnimeError(err?.message || 'Upload failed. Try again.')
+    } finally {
+      setAnimeBusy(false)
+    }
+  }
 
   const refreshWa = async () => {
     try {
@@ -230,6 +278,13 @@ function AppShell() {
   }, [])
 
   const toggleConnector = (id: string) => {
+    if (id === 'anime') {
+      setAnimeError('')
+      setAnimeDone('')
+      setAnimeFile(null)
+      setAnimeModalOpen(true)
+      return
+    }
     if (id === 'whatsapp') {
       if (wa.state === 'connected') {
         waDisconnect()
@@ -594,6 +649,60 @@ function AppShell() {
             )}
 
             <button className="wa-modal-close" onClick={() => setWaModalOpen(false)} disabled={waBusy}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---- Anime Maker upload modal ---- */}
+      {animeModalOpen && (
+        <div className="wa-modal-backdrop" onClick={() => !animeBusy && setAnimeModalOpen(false)}>
+          <div className="wa-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="wa-modal-title">Anime Maker</div>
+
+            {animeDone ? (
+              <div className="wa-modal-body">
+                <div className="wa-success">{animeDone}</div>
+              </div>
+            ) : (
+              <div className="wa-modal-body">
+                <div className="wa-modal-sub">
+                  Upload a story as a plain-text <b>.txt</b> file. Entwin turns it into an AI-generated movie and
+                  emails you a link when it&apos;s ready.
+                </div>
+
+                {/* Hidden native picker — opened by the Browse button */}
+                <input
+                  ref={animeFileInputRef}
+                  type="file"
+                  accept=".txt,text/plain"
+                  style={{ display: 'none' }}
+                  onChange={onAnimeFilePicked}
+                />
+
+                <div className="anime-file-row">
+                  <button className="anime-browse-btn" onClick={onAnimeBrowse} disabled={animeBusy}>
+                    Browse…
+                  </button>
+                  <span className="anime-file-name">
+                    {animeFile ? animeFile.name : 'No file selected'}
+                  </span>
+                </div>
+
+                {animeError && <div className="wa-error">{animeError}</div>}
+
+                <button
+                  className="connect-btn wa-modal-connect"
+                  onClick={onAnimeUpload}
+                  disabled={animeBusy || !animeFile}
+                >
+                  {animeBusy ? 'Uploading…' : 'Upload'}
+                </button>
+              </div>
+            )}
+
+            <button className="wa-modal-close" onClick={() => setAnimeModalOpen(false)} disabled={animeBusy}>
               Close
             </button>
           </div>

@@ -605,3 +605,28 @@ nav.nav-list {
   font-size: 13px; opacity: 0.6; padding: 4px 2px; color: inherit;
 }
 .wa-modal-close:hover { opacity: 1; }
+
+/* ---- Anime Maker modal ---- */
+.anime-file-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.anime-browse-btn {
+  border: 1px solid var(--border, #2a2a2a);
+  background: transparent;
+  color: inherit;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.anime-browse-btn:hover:not(:disabled) { opacity: 0.85; }
+.anime-browse-btn:disabled { opacity: 0.5; cursor: default; }
+.anime-file-name {
+  font-size: 13px;
+  opacity: 0.75;
+  word-break: break-all;
+}
