@@ -122,6 +122,33 @@ function AppShell() {
   const [animeDone, setAnimeDone] = useState('')
   const animeFileInputRef = useRef<HTMLInputElement>(null)
 
+  // ---- LLM backend settings state ----
+  type LlmProvider = 'claude' | 'gemini' | 'openai'
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('claude')
+  const [claudeModel, setClaudeModel] = useState('claude-opus-4-8')
+  const [claudeKey, setClaudeKey] = useState('')
+  const [geminiModel, setGeminiModel] = useState('gemini-3.6-flash')
+  const [geminiKey, setGeminiKey] = useState('')
+  const [openaiKey, setOpenaiKey] = useState('')
+  const [llmSaved, setLlmSaved] = useState('')
+
+  const saveLlmSettings = () => {
+    // Persist only what's relevant to the chosen provider.
+    const cfg: Record<string, string> = { provider: llmProvider }
+    if (llmProvider === 'claude') {
+      cfg.model = claudeModel
+      cfg.apiKey = claudeKey
+    } else if (llmProvider === 'gemini') {
+      cfg.model = geminiModel
+      cfg.apiKey = geminiKey
+    } else {
+      cfg.apiKey = openaiKey
+    }
+    // TODO: POST cfg to /api/settings/llm to store server-side (encrypted).
+    setLlmSaved('✓ LLM backend saved.')
+    setTimeout(() => setLlmSaved(''), 2500)
+  }
+
   const onAnimeBrowse = () => {
     setAnimeError('')
     animeFileInputRef.current?.click()
@@ -597,7 +624,119 @@ function AppShell() {
           {/* SETTINGS */}
           <div className={'view' + (view === 'settings' ? ' active' : '')}>
             <div className="view-header">Settings</div>
-            <div className="placeholder-body">Application settings will appear here.</div>
+
+            <div className="llm-settings">
+              <div className="llm-section-title">LLM backend</div>
+              <div className="llm-section-sub">
+                Choose which model answers queries against the vault. This can be changed later
+                without touching the rest of the app.
+              </div>
+
+              <div className="llm-radio-group">
+                <label className="llm-radio">
+                  <input
+                    type="radio"
+                    name="llm-provider"
+                    checked={llmProvider === 'claude'}
+                    onChange={() => setLlmProvider('claude')}
+                  />
+                  <span>Claude API</span>
+                </label>
+                <label className="llm-radio">
+                  <input
+                    type="radio"
+                    name="llm-provider"
+                    checked={llmProvider === 'gemini'}
+                    onChange={() => setLlmProvider('gemini')}
+                  />
+                  <span>Gemini API</span>
+                </label>
+                <label className="llm-radio">
+                  <input
+                    type="radio"
+                    name="llm-provider"
+                    checked={llmProvider === 'openai'}
+                    onChange={() => setLlmProvider('openai')}
+                  />
+                  <span>Open-AI API</span>
+                </label>
+              </div>
+
+              {llmProvider === 'claude' && (
+                <div className="llm-config">
+                  <label className="llm-field">
+                    <span className="llm-field-label">Model</span>
+                    <select
+                      className="llm-select"
+                      value={claudeModel}
+                      onChange={(e) => setClaudeModel(e.target.value)}
+                    >
+                      <option value="claude-opus-4-8">Claude Opus 4.8 (latest)</option>
+                      <option value="claude-sonnet-5">Claude Sonnet 5 (latest)</option>
+                      <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (latest)</option>
+                    </select>
+                  </label>
+                  <label className="llm-field">
+                    <span className="llm-field-label">API key</span>
+                    <input
+                      className="llm-input"
+                      type="password"
+                      placeholder="sk-ant-…"
+                      value={claudeKey}
+                      onChange={(e) => setClaudeKey(e.target.value)}
+                    />
+                  </label>
+                </div>
+              )}
+
+              {llmProvider === 'gemini' && (
+                <div className="llm-config">
+                  <label className="llm-field">
+                    <span className="llm-field-label">Model</span>
+                    <select
+                      className="llm-select"
+                      value={geminiModel}
+                      onChange={(e) => setGeminiModel(e.target.value)}
+                    >
+                      <option value="gemini-3.6-flash">Gemini Flash 3.6 (latest)</option>
+                      <option value="gemini-3.1-pro">Gemini Pro 3.1 (latest)</option>
+                    </select>
+                  </label>
+                  <label className="llm-field">
+                    <span className="llm-field-label">API key</span>
+                    <input
+                      className="llm-input"
+                      type="password"
+                      placeholder="AIza…"
+                      value={geminiKey}
+                      onChange={(e) => setGeminiKey(e.target.value)}
+                    />
+                  </label>
+                </div>
+              )}
+
+              {llmProvider === 'openai' && (
+                <div className="llm-config">
+                  <label className="llm-field">
+                    <span className="llm-field-label">API key</span>
+                    <input
+                      className="llm-input"
+                      type="password"
+                      placeholder="sk-…"
+                      value={openaiKey}
+                      onChange={(e) => setOpenaiKey(e.target.value)}
+                    />
+                  </label>
+                </div>
+              )}
+
+              <div className="llm-actions">
+                <button className="connect-btn" onClick={saveLlmSettings}>
+                  Save
+                </button>
+                {llmSaved && <span className="llm-saved">{llmSaved}</span>}
+              </div>
+            </div>
           </div>
         </div>
       </div>
