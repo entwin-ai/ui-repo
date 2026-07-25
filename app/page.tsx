@@ -53,6 +53,11 @@ const BRAND_ICONS: Record<string, JSX.Element> = {
   ),
 }
 
+interface GmailScan {
+  inboxCount: number
+  sentCount: number
+}
+
 interface Connector {
   name: string
   service: string | null
@@ -61,11 +66,16 @@ interface Connector {
   desc: string
   connected: boolean
   connectedEmail: string | null
+  // Gmail cards get a stable id used by the real OAuth + scan backend.
+  cardId?: 'gmail-personal' | 'gmail-professional'
+  // Local UI state for the Gmail read/parse flow.
+  scanning?: boolean
+  scan?: GmailScan | null
 }
 
 const INITIAL_CONNECTORS: Connector[] = [
-  { name: 'Gmail — Personal', service: 'gmail', icon: 'gmail', desc: 'Email ingestion for the vault.', connected: true, connectedEmail: 'alex.whitmore@gmail.com' },
-  { name: 'Gmail — Professional', service: 'gmail', icon: 'gmail', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null },
+  { name: 'Gmail — Personal', service: 'gmail', icon: 'gmail', cardId: 'gmail-personal', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
+  { name: 'Gmail — Professional', service: 'gmail', icon: 'gmail', cardId: 'gmail-professional', desc: 'Email ingestion for the vault.', connected: false, connectedEmail: null, scan: null },
   { name: 'Google Drive — Personal', service: 'drive', icon: 'drive', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
   { name: 'Google Drive — Professional', service: 'drive', icon: 'drive', desc: 'Document ingestion for the vault.', connected: false, connectedEmail: null },
   { name: 'Google Calendar', service: null, icon: 'calendar', desc: 'Meeting and scheduling context.', connected: false, connectedEmail: null },
@@ -240,14 +250,48 @@ function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: 
 
 /* ---------------- Connectors view ---------------- */
 
-function ConnectorsView({ connectors, setConnectors }: { connectors: Connector[]; setConnectors: React.Dispatch<React.SetStateAction<Connector[]>> }) {
+function ConnectorsView({
+  connectors,
+  setConnectors,
+  runGmailScan,
+}: {
+  connectors: Connector[]
+  setConnectors: React.Dispatch<React.SetStateAction<Connector[]>>
+  runGmailScan: (cardId: NonNullable<Connector['cardId']>) => void
+}) {
+  const isGmail = (c: Connector) => c.service === 'gmail' && !!c.cardId
+
   const toggle = (idx: number) => {
+    const c = connectors[idx]
+
+    // Gmail cards use the real OAuth + read/parse backend.
+    if (isGmail(c)) {
+      if (c.connected) {
+        // Disconnect: clear the server-side token, then reset the card.
+        fetch('/api/gmail/disconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ card: c.cardId }),
+        }).catch(() => {})
+        setConnectors((prev) =>
+          prev.map((x, i) =>
+            i === idx ? { ...x, connected: false, connectedEmail: null, scan: null, scanning: false } : x,
+          ),
+        )
+        return
+      }
+      // Connect: hand off to Google. This navigates the browser to the
+      // account chooser + consent screen; on return the app auto-scans.
+      window.location.href = `/api/gmail/authorize?card=${c.cardId}`
+      return
+    }
+
+    // Everything else stays a local, static toggle (prototype behaviour).
     setConnectors((prev) =>
-      prev.map((c, i) => {
-        if (i !== idx) return c
-        if (c.connected) return { ...c, connected: false, connectedEmail: null }
-        // Local, static toggle for the prototype (nothing wired beyond Google login)
-        return { ...c, connected: true, connectedEmail: c.service ? 'alex.whitmore@gmail.com' : null }
+      prev.map((x, i) => {
+        if (i !== idx) return x
+        if (x.connected) return { ...x, connected: false, connectedEmail: null }
+        return { ...x, connected: true, connectedEmail: x.service ? 'alex.whitmore@gmail.com' : null }
       }),
     )
   }
@@ -255,7 +299,17 @@ function ConnectorsView({ connectors, setConnectors }: { connectors: Connector[]
   return (
     <div id="connectors-grid">
       {connectors.map((c, idx) => {
-        const statusText = c.connected ? (c.connectedEmail ? `Connected as ${c.connectedEmail}` : 'Connected') : 'Not connected'
+        const gmail = isGmail(c)
+        let statusText: string
+        if (c.connected) {
+          statusText = c.connectedEmail ? `Connected as ${c.connectedEmail}` : 'Connected'
+        } else {
+          statusText = 'Not connected'
+        }
+
+        // Buttons: Gmail scanning shows a disabled "Reading…" state.
+        const btnLabel = c.scanning ? 'Reading…' : c.connected ? 'Disconnect' : 'Connect'
+
         return (
           <div className="connector-card" key={idx}>
             <div className="connector-top">
@@ -267,10 +321,29 @@ function ConnectorsView({ connectors, setConnectors }: { connectors: Connector[]
               <div className="connector-name">{c.name}</div>
             </div>
             <div className="connector-desc">{c.desc}</div>
+
+            {/* Gmail read summary — small font, inbox + sent counts. */}
+            {gmail && c.connected && (c.scanning || c.scan) && (
+              <div className="gmail-scan-summary">
+                {c.scanning ? (
+                  <span className="gmail-scan-loading">Reading your last 12 months of mail…</span>
+                ) : c.scan ? (
+                  <>
+                    <span>Inbox read: {c.scan.inboxCount.toLocaleString()} messages</span>
+                    <span>Sent read: {c.scan.sentCount.toLocaleString()} messages</span>
+                  </>
+                ) : null}
+              </div>
+            )}
+
             <div className="connector-bottom">
               <span className={`connector-status ${c.connected ? 'connected' : 'off'}`}>{statusText}</span>
-              <button className={`connect-toggle ${c.connected ? 'connected' : ''}`} onClick={() => toggle(idx)}>
-                {c.connected ? 'Disconnect' : 'Connect'}
+              <button
+                className={`connect-toggle ${c.connected ? 'connected' : ''}`}
+                onClick={() => toggle(idx)}
+                disabled={c.scanning}
+              >
+                {btnLabel}
               </button>
             </div>
           </div>
@@ -685,6 +758,68 @@ function AppShell() {
 
   const connectedCount = connectors.filter((c) => c.connected).length
 
+  // Kicks off a real Gmail scan: mark the card connected + scanning, pull the
+  // deduped inbox/sent counts from the backend, then show them in small font.
+  const runGmailScan = useMemo(
+    () =>
+      async (cardId: NonNullable<Connector['cardId']>) => {
+        // Pull the connected account email so the card can label itself.
+        let connectedEmail: string | null = null
+        try {
+          const st = await fetch(`/api/gmail/status?card=${cardId}`)
+          if (st.ok) connectedEmail = (await st.json()).connectedEmail ?? null
+        } catch {
+          /* ignore */
+        }
+
+        setConnectors((prev) =>
+          prev.map((c) =>
+            c.cardId === cardId
+              ? { ...c, connected: true, connectedEmail, scanning: true, scan: null }
+              : c,
+          ),
+        )
+
+        try {
+          const res = await fetch('/api/gmail/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ card: cardId }),
+          })
+          if (!res.ok) throw new Error('scan failed')
+          const data = (await res.json()) as { inboxCount: number; sentCount: number }
+          setConnectors((prev) =>
+            prev.map((c) =>
+              c.cardId === cardId
+                ? { ...c, scanning: false, scan: { inboxCount: data.inboxCount, sentCount: data.sentCount } }
+                : c,
+            ),
+          )
+        } catch {
+          setConnectors((prev) =>
+            prev.map((c) => (c.cardId === cardId ? { ...c, scanning: false } : c)),
+          )
+        }
+      },
+    [],
+  )
+
+  // On return from Google consent (?gmail=connected&card=...), open the
+  // Connectors view and start the scan for that card.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const gmail = params.get('gmail')
+    const card = params.get('card')
+    if (gmail === 'connected' && (card === 'gmail-personal' || card === 'gmail-professional')) {
+      setView('connectors')
+      runGmailScan(card)
+    }
+    if (gmail) {
+      // Clean the URL so a refresh doesn't re-trigger the flow.
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+  }, [runGmailScan])
+
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (modelWrapRef.current && !modelWrapRef.current.contains(e.target as Node)) setModelMenuOpen(false)
@@ -778,7 +913,7 @@ function AppShell() {
         {/* CONNECTORS */}
         <div className={`view${view === 'connectors' ? ' active' : ''}`} id="view-connectors">
           <div className="view-header">Connectors<div className="sub">Sources feeding the vault</div></div>
-          <ConnectorsView connectors={connectors} setConnectors={setConnectors} />
+          <ConnectorsView connectors={connectors} setConnectors={setConnectors} runGmailScan={runGmailScan} />
         </div>
 
         {/* DASHBOARD */}

@@ -126,3 +126,58 @@ invocations. Deploy on a host with a persistent Node process instead: local `nex
 a VPS, Railway/Render/Fly.io, a Docker container, or (per the roadmap) inside the Entwin
 desktop app — or keep the frontend on Vercel and run the WhatsApp service as a separate
 long-running worker the API routes proxy to.
+
+## Gmail connector (v3.1) — read & parse last 1 year
+
+The two **Gmail** cards (Personal / Professional) are now live. Entwin reads a
+year of mail so the vault can know pending activities, upcoming appointments,
+and who you owe a reply.
+
+Flow, when you click **Connect** on a Gmail card:
+
+1. The browser is sent to Google's **account chooser + consent screen**
+   (`prompt=select_account consent`), where you pick the account and grant the
+   read-only Gmail scope (`.../auth/gmail.readonly`). This is *incremental* —
+   base sign-in only asks for `openid email profile`; mailbox access is asked
+   for separately, only when you opt in on a Gmail card.
+2. Google redirects to `/api/gmail/callback`, which exchanges the code for
+   tokens (with a refresh token, `access_type=offline`) and stores them
+   server-side per (user, card) — so the two Gmail cards can hold two accounts.
+3. The app returns to **Connectors** and auto-runs a scan.
+4. `/api/gmail/scan` walks the **last 12 months** of `INBOX` and `SENT`, pages
+   through `messages.list`, and **de-duplicates by RFC822 `Message-Id`**.
+5. The card then shows, in small font: *Inbox read: N messages* and
+   *Sent read: N messages*.
+
+Per the current spec, **email content is not saved** — messages stream through
+only to be counted; the OAuth token is the only thing that persists.
+
+### Setup additions
+
+- Enable the **Gmail API** for your Google Cloud project.
+- Add `.../auth/gmail.readonly` on the OAuth consent screen (it's a *sensitive*
+  scope — in production this requires Google verification; for local testing add
+  yourself as a **test user**).
+- Add the second redirect URI: `http://localhost:3000/api/gmail/callback`.
+
+### Files
+
+```
+lib/gmail/service.ts                 # OAuth URL build, token exchange/refresh,
+                                     #   last-1y INBOX+SENT dedup counting
+lib/gmail/route-helpers.ts           # requireUser + card-id validation
+app/api/gmail/authorize/route.ts     # GET -> redirect to Google consent
+app/api/gmail/callback/route.ts      # GET -> token exchange, back to app
+app/api/gmail/scan/route.ts          # POST -> deduped inbox/sent counts
+app/api/gmail/status/route.ts        # GET  -> connected account + last scan
+app/api/gmail/disconnect/route.ts    # POST -> drop the stored token
+```
+
+### Notes
+
+- Tokens live in an in-process `Map` (fine for a prototype). For production,
+  persist them encrypted and move scanning to a background worker — a full-year
+  scan of a busy mailbox makes many Gmail API calls and can take a while.
+- Counting is done with `format=metadata` (Message-Id header only), so message
+  bodies are never fetched — cheaper, faster, and matches the "don't save
+  email" requirement.

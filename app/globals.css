@@ -371,6 +371,13 @@
   .connector-status { font-size: 11.5px; }
   .connector-status.connected { color: var(--green); font-weight: 500; }
   .connector-status.off { color: var(--text-muted); }
+  .gmail-scan-summary {
+    display: flex; flex-direction: column; gap: 2px;
+    font-size: 10.5px; line-height: 1.35; color: var(--text-muted);
+    margin-top: -2px;
+  }
+  .gmail-scan-loading { font-size: 10.5px; color: var(--text-muted); font-style: italic; }
+  .connect-toggle:disabled { opacity: 0.6; cursor: default; }
   .connect-toggle {
     font-size: 12px;
     font-weight: 500;
