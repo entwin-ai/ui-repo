@@ -1,12 +1,20 @@
-# Entwin — Frontend v2 (Google sign-in + Connectors)
+# Entwin — Frontend v3 (Google sign-in + static screens)
 
-A stripped-down Next.js app with exactly one flow:
+A Next.js app whose screens are ported from `entwin_frontend_v3.html`. The navigation is reproduced exactly; **Google authentication is the only wired behavior** — every other screen is static / local-only, matching the reference prototype.
 
-1. **Login screen** (from `entwin_frontend_v2.html`) with a **Continue with Google** button.
+1. **Login screen** with a **Continue with Google** button.
 2. Clicking it redirects to the **real Google sign-in screen** (OAuth via NextAuth, basic scopes: `openid email profile`).
-3. After successful authentication, the app shows the **Connectors page** — sidebar (New chat, Dashboard, Chat, Connectors, Entwin's Memory), header, and the four connector cards (Gmail connected with *Sync now* + *Poll every 15 min*; Google Calendar, WhatsApp, Slack not connected). The design-notes panel and screenshot annotations are not included.
+3. After successful authentication, the app shell loads with the exact v3 sidebar navigation: **New chat**, **Chat**, **Connectors**, **Dashboard**, **Memory**, **Settings**, plus a collapse toggle and the signed-in user row.
 
-The signed-in user's Google name, email, and avatar appear at the bottom of the sidebar, with a **Sign out** menu.
+### Screens (all static except Google login)
+
+- **Chat** — local echo placeholder with a model picker (Opus 4.8 / Sonnet 5 / Haiku 4.5).
+- **Connectors** — the full v3 grid (Gmail, Drive, Calendar, WhatsApp, Telegram, Slack, Browser history) with local Connect/Disconnect toggles.
+- **Dashboard** — Overview / Sender Kanban (drag-and-drop) / Entity Review sub-tabs.
+- **Memory** — illustrative sample graph; title follows the Entwin name set in Settings.
+- **Settings** — Entwin identity, LLM backend selector, per-provider model dropdown, credential fields, Save.
+
+The signed-in user's Google name, email, and avatar initials appear at the bottom of the sidebar, with a **Sign out** menu.
 
 ## Setup
 
