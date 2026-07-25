@@ -18,6 +18,7 @@
   --sidebar-w: 260px;
   --sidebar-w-collapsed: 68px;
   --green: var(--blue);
+  color-scheme: light;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body {
@@ -672,12 +673,20 @@ nav.nav-list {
 .llm-select,
 .llm-input {
   border: 1px solid var(--border);
-  background: var(--bg-card);
-  color: inherit;
+  background: #FFFFFF;
+  color: #211D1E;
+  color-scheme: light;
   padding: 9px 11px;
   border-radius: 8px;
   font-size: 13.5px;
   width: 100%;
+}
+.llm-select option {
+  background: #FFFFFF;
+  color: #211D1E;
+}
+.llm-input::placeholder {
+  color: rgba(33, 29, 30, 0.42);
 }
 .llm-actions {
   display: flex;
