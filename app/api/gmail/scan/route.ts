@@ -3,6 +3,9 @@ import { requireUser, isGmailCard } from '@/lib/gmail/route-helpers'
 import { scan } from '@/lib/gmail/service'
 
 export const dynamic = 'force-dynamic'
+// Counting a year of mail is now ~30 list calls per label, but give the
+// function headroom on Vercel. Hobby caps at 60s; Pro allows up to 300.
+export const maxDuration = 60
 
 /**
  * POST /api/gmail/scan  { card: "gmail-personal" }
