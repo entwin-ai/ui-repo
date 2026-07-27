@@ -103,28 +103,72 @@ interface GmailSession {
 
 const g = globalThis as unknown as {
   __entwinGmailSessions?: Map<string, GmailSession>
-  __entwinGmailPending?: Map<string, PendingFlow>
   __entwinGmailDataRoot?: string
 }
 if (!g.__entwinGmailSessions) g.__entwinGmailSessions = new Map<string, GmailSession>()
-if (!g.__entwinGmailPending) g.__entwinGmailPending = new Map<string, PendingFlow>()
 
 /** In-memory cache of sessions, keyed `${userEmail}::${cardId}`. */
 const sessions: Map<string, GmailSession> = g.__entwinGmailSessions
 
-/**
- * Pending OAuth flows, keyed by the opaque `state` param we send to Google.
- * These are short-lived (the round trip to Google's consent screen) and only
- * meaningful within the browser's redirect sequence, so they stay in memory.
- * If callback lands on a cold instance where the state is missing, the user is
- * simply asked to reconnect — the same failure mode as before.
- */
-interface PendingFlow {
-  userEmail: string
-  cardId: string
-  createdAt: number
+/* ---------------------------------------------------------------------------
+ * OAuth `state` — stateless & signed.
+ *
+ * The `state` param we hand Google must round-trip through the browser and come
+ * back to /api/gmail/callback. We must NOT keep it in a server-side Map: on
+ * Vercel the callback frequently lands on a *different* lambda instance than the
+ * one that built the authorize URL, so an in-memory pending map is empty on
+ * return and every connect fails with "Unknown or expired OAuth state" — which
+ * is exactly the silent "returns home, still Not connected" bug.
+ *
+ * Instead we encode {userEmail, cardId, ts} into the state itself and sign it
+ * with an HMAC keyed on NEXTAUTH_SECRET. Any instance can verify it with no
+ * shared memory. The signature stops a user from forging a state for another
+ * account; the timestamp bounds replay.
+ * ------------------------------------------------------------------------- */
+
+const STATE_TTL_MS = 10 * 60 * 1000 // 10 minutes to complete the consent screen
+
+function stateSecret(): string {
+  const s = process.env.NEXTAUTH_SECRET
+  if (!s) throw new Error('NEXTAUTH_SECRET is not set (required to sign OAuth state)')
+  return s
 }
-const pending: Map<string, PendingFlow> = g.__entwinGmailPending
+
+function b64url(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+function b64urlDecode(s: string): Buffer {
+  return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64')
+}
+
+/** Build a signed, self-contained state token: `<payload>.<sig>`. */
+function encodeState(userEmail: string, cardId: string): string {
+  const payload = b64url(Buffer.from(JSON.stringify({ userEmail, cardId, ts: Date.now() })))
+  const sig = b64url(crypto.createHmac('sha256', stateSecret()).update(payload).digest())
+  return `${payload}.${sig}`
+}
+
+/** Verify a state token and return its claims, or throw if invalid/expired. */
+function decodeState(state: string): { userEmail: string; cardId: string } {
+  const [payload, sig] = state.split('.')
+  if (!payload || !sig) throw new Error('Malformed OAuth state')
+
+  const expected = crypto.createHmac('sha256', stateSecret()).update(payload).digest()
+  const got = b64urlDecode(sig)
+  if (expected.length !== got.length || !crypto.timingSafeEqual(expected, got)) {
+    throw new Error('OAuth state signature mismatch')
+  }
+
+  const claims = JSON.parse(b64urlDecode(payload).toString('utf8')) as {
+    userEmail: string
+    cardId: string
+    ts: number
+  }
+  if (!claims.ts || Date.now() - claims.ts > STATE_TTL_MS) {
+    throw new Error('OAuth state expired — please try connecting again')
+  }
+  return { userEmail: claims.userEmail, cardId: claims.cardId }
+}
 
 /**
  * Resolve a writable data root. Serverless platforms (Vercel/Lambda) mount the
@@ -239,8 +283,8 @@ export function buildAuthUrl(userEmail: string, cardId: string): string {
   const clientId = process.env.GOOGLE_CLIENT_ID
   if (!clientId) throw new Error('GOOGLE_CLIENT_ID is not set')
 
-  const state = crypto.randomBytes(24).toString('hex')
-  pending.set(state, { userEmail, cardId, createdAt: Date.now() })
+  // Stateless signed state — no server-side pending map (see notes above).
+  const state = encodeState(userEmail, cardId)
 
   const sess = getSession(userEmail, cardId)
   sess.state = 'authorizing'
@@ -267,9 +311,8 @@ export async function handleCallback(
   code: string,
   state: string,
 ): Promise<{ userEmail: string; cardId: string }> {
-  const flow = pending.get(state)
-  if (!flow) throw new Error('Unknown or expired OAuth state')
-  pending.delete(state)
+  // Verify the signed state — any instance can do this with no shared memory.
+  const flow = decodeState(state)
 
   const clientId = process.env.GOOGLE_CLIENT_ID
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET

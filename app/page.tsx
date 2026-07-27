@@ -254,10 +254,14 @@ function ConnectorsView({
   connectors,
   setConnectors,
   runGmailScan,
+  notice,
+  clearNotice,
 }: {
   connectors: Connector[]
   setConnectors: React.Dispatch<React.SetStateAction<Connector[]>>
   runGmailScan: (cardId: NonNullable<Connector['cardId']>) => void
+  notice: string | null
+  clearNotice: () => void
 }) {
   const isGmail = (c: Connector) => c.service === 'gmail' && !!c.cardId
 
@@ -297,6 +301,13 @@ function ConnectorsView({
   }
 
   return (
+    <>
+    {notice && (
+      <div className="gmail-notice" role="alert">
+        <span>{notice}</span>
+        <button className="gmail-notice-close" aria-label="Dismiss" onClick={clearNotice}>×</button>
+      </div>
+    )}
     <div id="connectors-grid">
       {connectors.map((c, idx) => {
         const gmail = isGmail(c)
@@ -350,6 +361,7 @@ function ConnectorsView({
         )
       })}
     </div>
+    </>
   )
 }
 
@@ -753,6 +765,7 @@ function AppShell() {
   const userWrapRef = useRef<HTMLDivElement>(null)
 
   const [connectors, setConnectors] = useState<Connector[]>(INITIAL_CONNECTORS)
+  const [gmailNotice, setGmailNotice] = useState<string | null>(null)
   const [entities, setEntities] = useState<Entity[]>(INITIAL_ENTITIES)
   const [entwinName, setEntwinName] = useState('')
 
@@ -813,6 +826,16 @@ function AppShell() {
     if (gmail === 'connected' && (card === 'gmail-personal' || card === 'gmail-professional')) {
       setView('connectors')
       runGmailScan(card)
+    } else if (gmail === 'denied') {
+      setView('connectors')
+      setGmailNotice('Gmail connection was cancelled — you did not grant access.')
+    } else if (gmail === 'error') {
+      // Surface the real reason instead of silently returning to home.
+      const reason = params.get('reason')
+      setView('connectors')
+      setGmailNotice(
+        `Gmail connection failed${reason ? `: ${decodeURIComponent(reason)}` : ''}. Please try again.`,
+      )
     }
     if (gmail) {
       // Clean the URL so a refresh doesn't re-trigger the flow.
@@ -913,7 +936,7 @@ function AppShell() {
         {/* CONNECTORS */}
         <div className={`view${view === 'connectors' ? ' active' : ''}`} id="view-connectors">
           <div className="view-header">Connectors<div className="sub">Sources feeding the vault</div></div>
-          <ConnectorsView connectors={connectors} setConnectors={setConnectors} runGmailScan={runGmailScan} />
+          <ConnectorsView connectors={connectors} setConnectors={setConnectors} runGmailScan={runGmailScan} notice={gmailNotice} clearNotice={() => setGmailNotice(null)} />
         </div>
 
         {/* DASHBOARD */}
