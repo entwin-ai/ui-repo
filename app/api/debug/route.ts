@@ -49,6 +49,7 @@ export async function GET() {
       'MISSING_ENV — no matching Upstash vars found. Check relatedEnvVarNames for the real names.'
     return NextResponse.json(report, { status: 200 })
   }
+  
 
   const testKey = 'entwin:debug:ping'
   const testVal = `ok-${Date.now()}`
