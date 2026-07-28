@@ -467,9 +467,24 @@ async function countLabel(
       const detail = await listRes.text().catch(() => '')
       throw new Error(`Gmail list failed (${labelId}): ${listRes.status} ${detail}`)
     }
-    const page = (await listRes.json()) as {
-      messages?: { id: string }[]
-      nextPageToken?: string
+    // Read as text first: a 200 with an empty/truncated body (proxy hiccup,
+    // partial response) would make res.json() throw the opaque
+    // "Unexpected end of JSON input". Naming the label + body length makes the
+    // real cause visible.
+    const bodyText = await listRes.text()
+    if (!bodyText) {
+      throw new Error(
+        `Gmail list returned an empty body (${labelId}, status ${listRes.status}) — ` +
+          `likely a truncated/timed-out response, not an empty mailbox`,
+      )
+    }
+    let page: { messages?: { id: string }[]; nextPageToken?: string }
+    try {
+      page = JSON.parse(bodyText)
+    } catch {
+      throw new Error(
+        `Gmail list returned non-JSON (${labelId}): ${bodyText.slice(0, 200)}`,
+      )
     }
     total += (page.messages ?? []).length
     pageToken = page.nextPageToken
