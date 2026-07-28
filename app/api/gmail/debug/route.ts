@@ -10,20 +10,46 @@ export const dynamic = 'force-dynamic'
  * health and should not ship in production.
  */
 export async function GET() {
-  const url = process.env.UPSTASH_REDIS_REST_URL
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN
+  const urlCandidates = {
+    UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
+    KV_REST_API_URL: process.env.KV_REST_API_URL,
+    REDIS_REST_URL: process.env.REDIS_REST_URL,
+    STORAGE_REST_URL: process.env.STORAGE_REST_URL,
+  }
+  const tokenCandidates = {
+    UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
+    KV_REST_API_TOKEN: process.env.KV_REST_API_TOKEN,
+    REDIS_REST_TOKEN: process.env.REDIS_REST_TOKEN,
+    STORAGE_REST_TOKEN: process.env.STORAGE_REST_TOKEN,
+  }
+
+  const urlName = Object.keys(urlCandidates).find((k) => urlCandidates[k as keyof typeof urlCandidates])
+  const tokenName = Object.keys(tokenCandidates).find((k) => tokenCandidates[k as keyof typeof tokenCandidates])
+  const url = urlName ? urlCandidates[urlName as keyof typeof urlCandidates] : undefined
+  const token = tokenName ? tokenCandidates[tokenName as keyof typeof tokenCandidates] : undefined
+
+  // Also surface every env var name that mentions redis/kv/upstash/storage, so
+  // if the real names aren't in our candidate list we can still see them.
+  const relatedNames = Object.keys(process.env).filter((k) =>
+    /redis|kv|upstash|storage/i.test(k),
+  )
 
   const report: Record<string, unknown> = {
     urlPresent: Boolean(url),
     tokenPresent: Boolean(token),
+    urlVarNameMatched: urlName ?? null,
+    tokenVarNameMatched: tokenName ?? null,
+    relatedEnvVarNames: relatedNames,
     urlHost: url ? safeHost(url) : null,
     tokenLength: token ? token.length : 0,
   }
 
   if (!url || !token) {
-    report.verdict = 'MISSING_ENV — one or both Upstash vars are not visible at runtime'
+    report.verdict =
+      'MISSING_ENV — no matching Upstash vars found. Check relatedEnvVarNames for the real names.'
     return NextResponse.json(report, { status: 200 })
   }
+  
 
   const testKey = 'entwin:debug:ping'
   const testVal = `ok-${Date.now()}`
