@@ -186,8 +186,16 @@ function decodeState(state: string): { userEmail: string; cardId: string } {
  * fine for a single `next dev` process, and the store calls become no-ops.
  * ------------------------------------------------------------------------- */
 
-const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL
-const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN
+const REDIS_URL =
+  process.env.UPSTASH_REDIS_REST_URL ||
+  process.env.KV_REST_API_URL ||
+  process.env.REDIS_REST_URL ||
+  process.env.STORAGE_REST_URL
+const REDIS_TOKEN =
+  process.env.UPSTASH_REDIS_REST_TOKEN ||
+  process.env.KV_REST_API_TOKEN ||
+  process.env.REDIS_REST_TOKEN ||
+  process.env.STORAGE_REST_TOKEN
 const REDIS_ENABLED = Boolean(REDIS_URL && REDIS_TOKEN)
 
 // Tokens expire; there's no reason to keep a session forever. 30 days covers a
