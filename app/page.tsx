@@ -799,7 +799,10 @@ function AppShell() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ card: cardId }),
           })
-          if (!res.ok) throw new Error('scan failed')
+          if (!res.ok) {
+            const detail = await res.json().catch(() => ({}))
+            throw new Error(detail?.error || `scan failed (${res.status})`)
+          }
           const data = (await res.json()) as { inboxCount: number; sentCount: number }
           setConnectors((prev) =>
             prev.map((c) =>
@@ -808,7 +811,8 @@ function AppShell() {
                 : c,
             ),
           )
-        } catch {
+        } catch (e) {
+          setGmailNotice(`Gmail scan failed: ${(e as Error).message}`)
           setConnectors((prev) =>
             prev.map((c) => (c.cardId === cardId ? { ...c, scanning: false } : c)),
           )
