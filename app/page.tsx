@@ -799,15 +799,30 @@ function AppShell() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ card: cardId }),
           })
-          if (!res.ok) {
-            const detail = await res.json().catch(() => ({}))
-            throw new Error(detail?.error || `scan failed (${res.status})`)
+          const raw = await res.text()
+          let payload: { inboxCount?: number; sentCount?: number; error?: string } = {}
+          if (raw) {
+            try {
+              payload = JSON.parse(raw)
+            } catch {
+              // Empty/truncated body — almost always the serverless function was
+              // killed mid-scan (timeout on a large mailbox). Give a real message.
+              throw new Error(
+                res.ok
+                  ? 'The scan was cut off before it finished (likely a timeout on a large mailbox). Try again, or see notes on capping the scan.'
+                  : `scan failed (${res.status})`,
+              )
+            }
           }
-          const data = (await res.json()) as { inboxCount: number; sentCount: number }
+          if (!res.ok) throw new Error(payload.error || `scan failed (${res.status})`)
           setConnectors((prev) =>
             prev.map((c) =>
               c.cardId === cardId
-                ? { ...c, scanning: false, scan: { inboxCount: data.inboxCount, sentCount: data.sentCount } }
+                ? {
+                    ...c,
+                    scanning: false,
+                    scan: { inboxCount: payload.inboxCount ?? 0, sentCount: payload.sentCount ?? 0 },
+                  }
                 : c,
             ),
           )

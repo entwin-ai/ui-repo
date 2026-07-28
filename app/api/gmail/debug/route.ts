@@ -3,87 +3,89 @@ import { NextResponse } from 'next/server'
 export const dynamic = 'force-dynamic'
 
 /**
- * GET /api/gmail/debug
- * Temporary diagnostic for the Gmail token store. Reports whether the Upstash
- * env vars are visible at runtime and whether a real SET/GET round-trip works.
- * DELETE THIS ROUTE once the connector is confirmed working — it exposes store
- * health and should not ship in production.
+ * GET /api/gmail/debug  —  TEMPORARY diagnostic. Delete before shipping.
+ *
+ * Dumps everything we need to tell apart the three suspects:
+ *   1. token store not wired  (Redis env missing / unreachable)
+ *   2. OAuth client id/secret mismatch or missing
+ *   3. code not actually deployed  (buildMarker below)
+ *
+ * No secret VALUES are printed — only presence, length, and a short fingerprint
+ * (first/last 4 chars) so you can eyeball a match against the console without
+ * exposing the secret.
  */
-export async function GET() {
-  const urlCandidates = {
-    UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
-    KV_REST_API_URL: process.env.KV_REST_API_URL,
-    REDIS_REST_URL: process.env.REDIS_REST_URL,
-    STORAGE_REST_URL: process.env.STORAGE_REST_URL,
-  }
-  const tokenCandidates = {
-    UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
-    KV_REST_API_TOKEN: process.env.KV_REST_API_TOKEN,
-    REDIS_REST_TOKEN: process.env.REDIS_REST_TOKEN,
-    STORAGE_REST_TOKEN: process.env.STORAGE_REST_TOKEN,
-  }
 
-  const urlName = Object.keys(urlCandidates).find((k) => urlCandidates[k as keyof typeof urlCandidates])
-  const tokenName = Object.keys(tokenCandidates).find((k) => tokenCandidates[k as keyof typeof tokenCandidates])
-  const url = urlName ? urlCandidates[urlName as keyof typeof urlCandidates] : undefined
-  const token = tokenName ? tokenCandidates[tokenName as keyof typeof tokenCandidates] : undefined
+// Bump this string whenever you deploy. If the response doesn't echo the value
+// you just set, the deployment did NOT include your latest code — full stop.
+const BUILD_MARKER = 'debug-v3-2026-07-28'
 
-  // Also surface every env var name that mentions redis/kv/upstash/storage, so
-  // if the real names aren't in our candidate list we can still see them.
-  const relatedNames = Object.keys(process.env).filter((k) =>
-    /redis|kv|upstash|storage/i.test(k),
-  )
+function fingerprint(v: string | undefined): string | null {
+  if (!v) return null
+  if (v.length <= 8) return `len=${v.length} (too short to fingerprint)`
+  return `len=${v.length} ${v.slice(0, 4)}…${v.slice(-4)}`
+}
 
-  const report: Record<string, unknown> = {
-    urlPresent: Boolean(url),
-    tokenPresent: Boolean(token),
-    urlVarNameMatched: urlName ?? null,
-    tokenVarNameMatched: tokenName ?? null,
-    relatedEnvVarNames: relatedNames,
-    urlHost: url ? safeHost(url) : null,
-    tokenLength: token ? token.length : 0,
-  }
-
-  if (!url || !token) {
-    report.verdict =
-      'MISSING_ENV — no matching Upstash vars found. Check relatedEnvVarNames for the real names.'
-    return NextResponse.json(report, { status: 200 })
-  }
-  
-
-  const testKey = 'entwin:debug:ping'
-  const testVal = `ok-${Date.now()}`
-
+async function redisRoundTrip(url?: string, token?: string) {
+  if (!url || !token) return { attempted: false }
   try {
-    // SET
+    const key = 'entwin:debug:ping'
+    const val = `ok-${Date.now()}`
     const setRes = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(['SET', testKey, testVal, 'EX', 60]),
+      body: JSON.stringify(['SET', key, val, 'EX', 60]),
     })
-    report.setStatus = setRes.status
-    const setJson = await setRes.json().catch(() => null)
-    report.setBody = setJson
-
-    // GET
     const getRes = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(['GET', testKey]),
+      body: JSON.stringify(['GET', key]),
     })
-    report.getStatus = getRes.status
     const getJson = (await getRes.json().catch(() => null)) as { result?: unknown } | null
-    report.getBody = getJson
-    report.roundTripOk = getJson?.result === testVal
-    report.verdict = report.roundTripOk
-      ? 'OK — Redis SET/GET round-trip works; token store is healthy'
-      : 'REDIS_MISMATCH — round-trip did not return the written value (check URL/token pair)'
+    return {
+      attempted: true,
+      setStatus: setRes.status,
+      getStatus: getRes.status,
+      roundTripOk: getJson?.result === val,
+    }
   } catch (e) {
-    report.verdict = 'REDIS_ERROR'
-    report.error = (e as Error).message
+    return { attempted: true, error: (e as Error).message }
   }
+}
 
-  return NextResponse.json(report, { status: 200 })
+export async function GET() {
+  const redisUrl =
+    process.env.UPSTASH_REDIS_REST_URL ||
+    process.env.KV_REST_API_URL ||
+    process.env.REDIS_REST_URL ||
+    process.env.STORAGE_REST_URL
+  const redisToken =
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    process.env.KV_REST_API_TOKEN ||
+    process.env.REDIS_REST_TOKEN ||
+    process.env.STORAGE_REST_TOKEN
+
+  const redis = await redisRoundTrip(redisUrl, redisToken)
+
+  return NextResponse.json({
+    buildMarker: BUILD_MARKER,
+    oauth: {
+      clientIdFingerprint: fingerprint(process.env.GOOGLE_CLIENT_ID),
+      clientSecretFingerprint: fingerprint(process.env.GOOGLE_CLIENT_SECRET),
+      clientIdEndsWithGoogleusercontent:
+        process.env.GOOGLE_CLIENT_ID?.endsWith('.apps.googleusercontent.com') ?? false,
+      clientSecretStartsWithGocspx:
+        process.env.GOOGLE_CLIENT_SECRET?.startsWith('GOCSPX-') ?? false,
+    },
+    store: {
+      redisUrlPresent: Boolean(redisUrl),
+      redisTokenPresent: Boolean(redisToken),
+      redisUrlHost: redisUrl ? safeHost(redisUrl) : null,
+      redis,
+    },
+    allRelatedEnvVarNames: Object.keys(process.env).filter((k) =>
+      /redis|kv|upstash|storage|google|nextauth/i.test(k),
+    ),
+  })
 }
 
 function safeHost(u: string): string {

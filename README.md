@@ -49,6 +49,50 @@ npm run dev
 
 Open http://localhost:3000 — you'll see the sign-in screen. Click **Continue with Google**, complete Google's consent screen, and you'll land on the Connectors page.
 
+## Gmail connector setup
+
+The Gmail cards ("Personal" / "Professional") connect a Google account and scan the
+last 12 months of INBOX and SENT to show message counts. Two pieces of external setup
+are required beyond the basic OAuth above.
+
+### A. Enable the Gmail API
+
+The OAuth client authenticates the user, but the Gmail **API** must be enabled in the
+same Google Cloud project or scans fail with a 403 `SERVICE_DISABLED`:
+
+1. Go to [Gmail API in the API Library](https://console.cloud.google.com/apis/library/gmail.googleapis.com), select your project, and click **Enable**.
+2. Enabling takes a few minutes to propagate. (Enable **Google Drive API** too if you'll use the Drive cards.)
+3. The Gmail scope `https://www.googleapis.com/auth/gmail.readonly` is requested during the Gmail card's own consent step (separate from basic login).
+
+### B. Durable token store (Upstash Redis) — required on Vercel
+
+On serverless platforms the OAuth callback and the scan often run on **different**
+instances. Without a shared store the token saved by the callback is invisible to the
+scan, which then fails with *"Gmail is not connected for this card."* A shared Redis
+store fixes this.
+
+1. Create a free Redis database at [console.upstash.com](https://console.upstash.com) (or via **Vercel → Storage → Upstash Redis**, which auto-injects the vars).
+2. Copy the **REST** credentials and set them as env vars:
+   ```
+   UPSTASH_REDIS_REST_URL=https://your-db.upstash.io
+   UPSTASH_REDIS_REST_TOKEN=your-rest-token
+   ```
+   The store also reads `KV_REST_API_URL`/`KV_REST_API_TOKEN` (Vercel's names) as a fallback.
+3. **Redeploy** after adding env vars — Vercel only injects them into a fresh build.
+
+Locally (single `next dev` process) the store falls back to in-memory and works without Redis.
+
+### Large mailboxes
+
+The scan caps at `MAX_PAGES` (20 pages × 500 = 10,000 messages) per label and runs INBOX
+and SENT in parallel, so it finishes within the serverless time budget regardless of
+mailbox size. If a mailbox exceeds the cap the count is a lower bound (`capped: true`).
+On **Vercel Hobby** (60s function limit) a very large account may still need `MAX_PAGES`
+lowered in `lib/gmail/service.ts`, or a Pro plan (up to 300s).
+
+> **Note:** `app/api/gmail/debug/route.ts` is a temporary diagnostic that reports env-var
+> presence and Redis health. **Delete it before shipping to production.**
+
 ## Project structure
 
 ```

@@ -79,6 +79,7 @@ export type GmailState = 'disconnected' | 'authorizing' | 'connected'
 export interface GmailScanResult {
   inboxCount: number
   sentCount: number
+  capped?: boolean // true when MAX_PAGES was hit — counts are a lower bound
   scannedAt: number
 }
 
@@ -434,19 +435,21 @@ async function ensureAccessToken(
  * Count messages in one Gmail label over the last year.
  *
  * We page through messages.list (up to 500 ids per page) and sum the number of
- * ids. No per-message fetch — that was the source of the timeout. messages.list
- * is already scoped to the label, so INBOX / SENT counts match what the user
- * sees in Gmail's own views for the same `after:` window.
- *
- * Note vs. the old behaviour: the previous code deduplicated by RFC822
- * Message-Id, which required fetching every message. Within a single label
- * duplicate Message-Ids are rare, so the counts are effectively the same, and
- * this version returns in ~O(pages) HTTP calls instead of O(messages).
+ * ids. No per-message fetch. To guarantee the scan finishes inside the
+ * serverless time budget regardless of mailbox size, we cap the number of pages
+ * (MAX_PAGES). If the cap is hit, the returned count is a lower bound and
+ * `capped` is true, so the caller can label the number as "at least N".
  */
-async function countLabel(accessToken: string, labelId: 'INBOX' | 'SENT'): Promise<number> {
+const MAX_PAGES = 20 // 20 * 500 = up to 10,000 messages per label before capping
+
+async function countLabel(
+  accessToken: string,
+  labelId: 'INBOX' | 'SENT',
+): Promise<{ count: number; capped: boolean }> {
   const q = oneYearAgoQuery()
   let pageToken: string | undefined
   let total = 0
+  let pages = 0
 
   do {
     const listUrl = new URL(`${GMAIL_API}/messages`)
@@ -470,9 +473,13 @@ async function countLabel(accessToken: string, labelId: 'INBOX' | 'SENT'): Promi
     }
     total += (page.messages ?? []).length
     pageToken = page.nextPageToken
+    pages += 1
+    if (pages >= MAX_PAGES && pageToken) {
+      return { count: total, capped: true }
+    }
   } while (pageToken)
 
-  return total
+  return { count: total, capped: false }
 }
 
 /** Count the last year of inbox + sent and cache the result. */
@@ -481,12 +488,19 @@ export async function scan(userEmail: string, cardId: string): Promise<GmailScan
   if (sess.state !== 'connected') throw new Error('Gmail is not connected for this card')
   const accessToken = await ensureAccessToken(userEmail, cardId, sess)
 
-  // Sequential is fine — ~30 calls each for a large mailbox. If you ever need
-  // it faster, these two are independent and can be Promise.all'd.
-  const inboxCount = await countLabel(accessToken, 'INBOX')
-  const sentCount = await countLabel(accessToken, 'SENT')
+  // Run both labels in parallel — they're independent, so worst-case wall time
+  // is one label's worth of paging, not two.
+  const [inbox, sent] = await Promise.all([
+    countLabel(accessToken, 'INBOX'),
+    countLabel(accessToken, 'SENT'),
+  ])
 
-  const result: GmailScanResult = { inboxCount, sentCount, scannedAt: Date.now() }
+  const result: GmailScanResult = {
+    inboxCount: inbox.count,
+    sentCount: sent.count,
+    capped: inbox.capped || sent.capped,
+    scannedAt: Date.now(),
+  }
   sess.scan = result
   await saveSession(userEmail, cardId, sess)
   return result
