@@ -57,9 +57,6 @@
  */
 
 import crypto from 'crypto'
-import fs from 'fs'
-import os from 'os'
-import path from 'path'
 
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
 const OAUTH_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -97,13 +94,15 @@ interface GmailSession {
 /* ---------------------------------------------------------------------------
  * Persistence
  *
- * Mirrors lib/whatsapp/service.ts: a globalThis-pinned in-memory cache (so a
- * warm lambda / dev hot-reload reuses it) backed by a JSON file per session.
+ * A globalThis-pinned in-memory cache (so a warm lambda / dev hot-reload reuses
+ * it) backed by a shared Upstash Redis store (see the store section below). The
+ * shared store is what makes tokens survive a callback and scan landing on
+ * different serverless instances — the old per-instance JSON-file store did
+ * not, which is why scans failed with "Gmail is not connected for this card".
  * ------------------------------------------------------------------------- */
 
 const g = globalThis as unknown as {
   __entwinGmailSessions?: Map<string, GmailSession>
-  __entwinGmailDataRoot?: string
 }
 if (!g.__entwinGmailSessions) g.__entwinGmailSessions = new Map<string, GmailSession>()
 
@@ -170,103 +169,120 @@ function decodeState(state: string): { userEmail: string; cardId: string } {
   return { userEmail: claims.userEmail, cardId: claims.cardId }
 }
 
-/**
- * Resolve a writable data root. Serverless platforms (Vercel/Lambda) mount the
- * app at a read-only path like /var/task, so we probe candidates in order:
- *   1. ENTWIN_DATA_DIR env var (recommended for any real deployment)
- *   2. <cwd>/.entwin-data (local dev / self-hosted `next start`)
- *   3. <os tmpdir>/entwin-data (last resort — EPHEMERAL: wiped between
- *      serverless invocations, so tokens will not survive a cold start)
- */
-function resolveDataRoot(): string {
-  const candidates = [
-    process.env.ENTWIN_DATA_DIR,
-    path.join(process.cwd(), '.entwin-data'),
-    path.join(os.tmpdir(), 'entwin-data'),
-  ].filter(Boolean) as string[]
-  for (const dir of candidates) {
-    try {
-      fs.mkdirSync(dir, { recursive: true })
-      fs.accessSync(dir, fs.constants.W_OK)
-      return dir
-    } catch {
-      /* try next candidate */
-    }
-  }
-  throw new Error('No writable data directory found — set ENTWIN_DATA_DIR to a writable path')
-}
+/* ---------------------------------------------------------------------------
+ * Durable store — Upstash Redis over its REST API.
+ *
+ * The previous file-based store lost tokens on Vercel: /api/gmail/callback and
+ * /api/gmail/scan run on different lambda instances, and the /tmp fallback is
+ * per-instance, so the scan never saw the token the callback wrote. A shared
+ * external store fixes that. We use Upstash's REST endpoint (plain fetch, no
+ * SDK) so there's no extra dependency and it works on any Vercel plan.
+ *
+ * Set these env vars (Vercel → Storage → Upstash gives you both):
+ *   UPSTASH_REDIS_REST_URL
+ *   UPSTASH_REDIS_REST_TOKEN
+ *
+ * If they're absent (e.g. local dev), we fall back to the in-memory Map only —
+ * fine for a single `next dev` process, and the store calls become no-ops.
+ * ------------------------------------------------------------------------- */
 
-const DATA_ROOT: string = g.__entwinGmailDataRoot ?? (g.__entwinGmailDataRoot = resolveDataRoot())
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN
+const REDIS_ENABLED = Boolean(REDIS_URL && REDIS_TOKEN)
+
+// Tokens expire; there's no reason to keep a session forever. 30 days covers a
+// long-lived refresh token while letting abandoned sessions age out.
+const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 
 function keyFor(userEmail: string, cardId: string): string {
   return `${userEmail}::${cardId}`
 }
 
-/** Opaque, filesystem-safe filename for a (user, card) pair. */
-function sessionFile(userEmail: string, cardId: string): string {
+/** Opaque, collision-resistant Redis key for a (user, card) pair. */
+function redisKey(userEmail: string, cardId: string): string {
   const hash = crypto
     .createHash('sha256')
     .update(keyFor(userEmail, cardId).toLowerCase())
     .digest('hex')
     .slice(0, 24)
-  return path.join(DATA_ROOT, 'gmail', `${hash}.json`)
+  return `entwin:gmail:${hash}`
 }
 
-/** Persist a session to disk (best-effort; never throws into the request). */
-function writeStore(userEmail: string, cardId: string, sess: GmailSession): void {
+/** Fire a single Upstash REST command: POST [cmd, ...args] as a JSON array. */
+async function redisCmd(args: (string | number)[]): Promise<unknown> {
+  const res = await fetch(REDIS_URL as string, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${REDIS_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(args),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(`Redis command failed: ${res.status} ${detail}`)
+  }
+  const json = (await res.json()) as { result?: unknown; error?: string }
+  if (json.error) throw new Error(`Redis error: ${json.error}`)
+  return json.result
+}
+
+/** Persist a session (best-effort; never throws into the request path). */
+async function writeStore(userEmail: string, cardId: string, sess: GmailSession): Promise<void> {
+  if (!REDIS_ENABLED) return
   try {
-    const file = sessionFile(userEmail, cardId)
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, JSON.stringify(sess), 'utf8')
+    await redisCmd(['SET', redisKey(userEmail, cardId), JSON.stringify(sess), 'EX', SESSION_TTL_SECONDS])
   } catch {
-    /* disk not writable (or ephemeral) — in-memory cache still serves warm hits */
+    /* store unavailable — in-memory cache still serves warm hits this instance */
   }
 }
 
-/** Load a session from disk if present. */
-function readStore(userEmail: string, cardId: string): GmailSession | undefined {
+/** Load a session from the store if present. */
+async function readStore(userEmail: string, cardId: string): Promise<GmailSession | undefined> {
+  if (!REDIS_ENABLED) return undefined
   try {
-    const file = sessionFile(userEmail, cardId)
-    if (!fs.existsSync(file)) return undefined
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as GmailSession
+    const raw = (await redisCmd(['GET', redisKey(userEmail, cardId)])) as string | null
+    if (!raw) return undefined
+    return JSON.parse(raw) as GmailSession
   } catch {
     return undefined
   }
 }
 
-function deleteStore(userEmail: string, cardId: string): void {
+async function deleteStore(userEmail: string, cardId: string): Promise<void> {
+  if (!REDIS_ENABLED) return
   try {
-    fs.rmSync(sessionFile(userEmail, cardId), { force: true })
+    await redisCmd(['DEL', redisKey(userEmail, cardId)])
   } catch {
     /* ignore */
   }
 }
 
 /**
- * Get a session, checking the in-memory cache first, then disk, then creating
- * a fresh disconnected one. The disk read is what makes tokens survive a
- * callback and scan landing on different lambda instances.
+ * Get a session: in-memory cache first (warm hits on the same instance), then
+ * the shared store, then a fresh disconnected one. The store read is what makes
+ * tokens survive a callback and scan landing on different lambda instances.
  */
-function getSession(userEmail: string, cardId: string): GmailSession {
+async function getSession(userEmail: string, cardId: string): Promise<GmailSession> {
   const k = keyFor(userEmail, cardId)
-  let s = sessions.get(k)
-  if (s) return s
+  const cached = sessions.get(k)
+  if (cached) return cached
 
-  const fromDisk = readStore(userEmail, cardId)
-  if (fromDisk) {
-    sessions.set(k, fromDisk)
-    return fromDisk
+  const fromStore = await readStore(userEmail, cardId)
+  if (fromStore) {
+    sessions.set(k, fromStore)
+    return fromStore
   }
 
-  s = { state: 'disconnected' }
-  sessions.set(k, s)
-  return s
+  const fresh: GmailSession = { state: 'disconnected' }
+  sessions.set(k, fresh)
+  return fresh
 }
 
-/** Write a session through both the in-memory cache and disk. */
-function saveSession(userEmail: string, cardId: string, sess: GmailSession): void {
+/** Write a session through both the in-memory cache and the shared store. */
+async function saveSession(userEmail: string, cardId: string, sess: GmailSession): Promise<void> {
   sessions.set(keyFor(userEmail, cardId), sess)
-  writeStore(userEmail, cardId, sess)
+  await writeStore(userEmail, cardId, sess)
 }
 
 /* ---------------------------------------------------------------------------
@@ -279,16 +295,16 @@ function redirectUri(): string {
 }
 
 /** Build the Google consent URL and register the pending flow. */
-export function buildAuthUrl(userEmail: string, cardId: string): string {
+export async function buildAuthUrl(userEmail: string, cardId: string): Promise<string> {
   const clientId = process.env.GOOGLE_CLIENT_ID
   if (!clientId) throw new Error('GOOGLE_CLIENT_ID is not set')
 
   // Stateless signed state — no server-side pending map (see notes above).
   const state = encodeState(userEmail, cardId)
 
-  const sess = getSession(userEmail, cardId)
+  const sess = await getSession(userEmail, cardId)
   sess.state = 'authorizing'
-  saveSession(userEmail, cardId, sess)
+  await saveSession(userEmail, cardId, sess)
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -353,13 +369,13 @@ export async function handleCallback(
     /* non-fatal */
   }
 
-  const sess = getSession(flow.userEmail, flow.cardId)
+  const sess = await getSession(flow.userEmail, flow.cardId)
   sess.state = 'connected'
   sess.accessToken = tok.access_token
   if (tok.refresh_token) sess.refreshToken = tok.refresh_token
   sess.expiresAt = Date.now() + tok.expires_in * 1000
   sess.connectedEmail = connectedEmail
-  saveSession(flow.userEmail, flow.cardId, sess)
+  await saveSession(flow.userEmail, flow.cardId, sess)
 
   return { userEmail: flow.userEmail, cardId: flow.cardId }
 }
@@ -398,7 +414,7 @@ async function ensureAccessToken(
   const tok = (await res.json()) as { access_token: string; expires_in: number }
   sess.accessToken = tok.access_token
   sess.expiresAt = Date.now() + tok.expires_in * 1000
-  saveSession(userEmail, cardId, sess)
+  await saveSession(userEmail, cardId, sess)
   return sess.accessToken
 }
 
@@ -453,7 +469,7 @@ async function countLabel(accessToken: string, labelId: 'INBOX' | 'SENT'): Promi
 
 /** Count the last year of inbox + sent and cache the result. */
 export async function scan(userEmail: string, cardId: string): Promise<GmailScanResult> {
-  const sess = getSession(userEmail, cardId)
+  const sess = await getSession(userEmail, cardId)
   if (sess.state !== 'connected') throw new Error('Gmail is not connected for this card')
   const accessToken = await ensureAccessToken(userEmail, cardId, sess)
 
@@ -464,7 +480,7 @@ export async function scan(userEmail: string, cardId: string): Promise<GmailScan
 
   const result: GmailScanResult = { inboxCount, sentCount, scannedAt: Date.now() }
   sess.scan = result
-  saveSession(userEmail, cardId, sess)
+  await saveSession(userEmail, cardId, sess)
   return result
 }
 
@@ -478,8 +494,8 @@ export interface GmailStatus {
   scan: GmailScanResult | null
 }
 
-export function status(userEmail: string, cardId: string): GmailStatus {
-  const sess = getSession(userEmail, cardId)
+export async function status(userEmail: string, cardId: string): Promise<GmailStatus> {
+  const sess = await getSession(userEmail, cardId)
   return {
     state: sess.state,
     connectedEmail: sess.connectedEmail ?? null,
@@ -487,7 +503,7 @@ export function status(userEmail: string, cardId: string): GmailStatus {
   }
 }
 
-export function disconnect(userEmail: string, cardId: string): void {
+export async function disconnect(userEmail: string, cardId: string): Promise<void> {
   sessions.delete(keyFor(userEmail, cardId))
-  deleteStore(userEmail, cardId)
+  await deleteStore(userEmail, cardId)
 }

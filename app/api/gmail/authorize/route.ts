@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const url = buildAuthUrl(auth.email, card)
+    const url = await buildAuthUrl(auth.email, card)
     return NextResponse.redirect(url)
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 })

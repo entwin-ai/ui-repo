@@ -13,6 +13,6 @@ export async function POST(req: NextRequest) {
   if (!isGmailCard(card)) {
     return NextResponse.json({ error: 'Invalid or missing card id' }, { status: 400 })
   }
-  disconnect(auth.email, card)
+  await disconnect(auth.email, card)
   return NextResponse.json({ ok: true })
 }

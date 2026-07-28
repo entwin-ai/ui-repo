@@ -13,5 +13,5 @@ export async function GET(req: NextRequest) {
   if (!isGmailCard(card)) {
     return NextResponse.json({ error: 'Invalid or missing card id' }, { status: 400 })
   }
-  return NextResponse.json(status(auth.email, card))
+  return NextResponse.json(await status(auth.email, card))
 }
