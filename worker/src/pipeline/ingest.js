@@ -1,0 +1,195 @@
+import { admin } from '../lib/supabase.js';
+import { getMessage, extractParts } from '../lib/gmail.js';
+import { cleanBody, contentHash } from '../lib/clean.js';
+import { classify } from '../lib/classify.js';
+import { writeMemoryNote, extractEntities, updatesSummary } from '../lib/anthropic.js';
+import { embed, EMBED_MODEL } from '../lib/embed.js';
+
+// Process ONE Gmail message for an account. `acct` = { user_email, card_id }.
+// user_email is taken from the account row and threaded into every write.
+export async function ingestMessage(accessToken, acct, gmailMsgId) {
+  const { user_email, card_id } = acct;
+
+  const { data: existing } = await admin
+    .from('email_message')
+    .select('id')
+    .eq('user_email', user_email)
+    .eq('gmail_msg_id', gmailMsgId)
+    .maybeSingle();
+  if (existing) return { skipped: true };
+
+  const raw = await getMessage(accessToken, gmailMsgId);
+  const { headers, text, html, labels, threadId, internalDate } = extractParts(raw);
+  const sender = headers['from'] || '';
+  const subject = headers['subject'] || '(no subject)';
+  const recipients = (headers['to'] || '').split(',').map((s) => s.trim());
+  const clean = cleanBody({ text, html });
+  const hash = contentHash(clean);
+
+  let decision = classify({ headers, sender });
+
+  const { data: msgRow, error: msgErr } = await admin
+    .from('email_message')
+    .upsert(
+      {
+        user_email,
+        card_id,
+        gmail_msg_id: gmailMsgId,
+        thread_id: threadId,
+        internal_date: internalDate.toISOString(),
+        sender,
+        recipients,
+        subject,
+        labels,
+        tier: decision.tier,
+        tier_reason: decision.reason,
+        clean_body: clean,
+        content_hash: hash,
+      },
+      { onConflict: 'user_email,gmail_msg_id' }
+    )
+    .select()
+    .single();
+  if (msgErr) throw new Error(`ledger upsert: ${msgErr.message}`);
+
+  try {
+    if (decision.tier === 'ignore') {
+      await appendRollup(acct, internalDate, 'ignored', {
+        time: hhmm(internalDate),
+        sender,
+        subject,
+        reason: decision.reason,
+      });
+    } else if (decision.tier === 'storage') {
+      const { summary, urgent } = await updatesSummary(user_email, { subject, sender, body: clean });
+      if (urgent) {
+        decision = { tier: 'memory', reason: 'reclassified-urgent' };
+        await admin
+          .from('email_message')
+          .update({ tier: 'memory', tier_reason: 'reclassified-urgent' })
+          .eq('id', msgRow.id);
+        await runMemoryPipeline(acct, msgRow, { subject, sender, body: clean, internalDate, gmailMsgId });
+      } else {
+        await appendRollup(acct, internalDate, 'updates', {
+          time: hhmm(internalDate),
+          sender,
+          category: decision.category || 'update',
+          summary,
+          msg_id: gmailMsgId,
+        });
+      }
+    } else {
+      await runMemoryPipeline(acct, msgRow, { subject, sender, body: clean, internalDate, gmailMsgId });
+    }
+
+    await admin
+      .from('email_message')
+      .update({ processed_at: new Date().toISOString(), process_error: null })
+      .eq('id', msgRow.id);
+    return { tier: decision.tier };
+  } catch (err) {
+    await admin.from('email_message').update({ process_error: String(err.message || err) }).eq('id', msgRow.id);
+    throw err;
+  }
+}
+
+async function runMemoryPipeline(acct, msgRow, m) {
+  const { user_email, card_id } = acct;
+
+  const note = await writeMemoryNote(user_email, {
+    subject: m.subject,
+    sender: m.sender,
+    body: m.body,
+    date: m.internalDate.toISOString().slice(0, 10),
+  });
+  const related = await extractEntities(user_email, { subject: m.subject, sender: m.sender, body: m.body });
+
+  const noteDate = m.internalDate.toISOString().slice(0, 10);
+  const noteId = await nextNoteId(user_email, noteDate, 'email');
+  const sourceUrl = `https://mail.google.com/mail/u/0/#all/${m.gmailMsgId}`;
+
+  const { data: noteRow, error: noteErr } = await admin
+    .from('memory_note')
+    .insert({
+      user_email,
+      card_id,
+      note_id: noteId,
+      message_id: msgRow.id,
+      gmail_msg_id: m.gmailMsgId,
+      source: 'email',
+      note_date: noteDate,
+      name: m.subject,
+      raw_summary: note.raw_summary,
+      urgency: note.urgency,
+      life_domain: note.life_domain,
+      action: note.action,
+      free_text: note.free_text,
+      confidentiality: note.confidentiality,
+      related_entities: related,
+      source_url: sourceUrl,
+    })
+    .select()
+    .single();
+  if (noteErr) throw new Error(`note insert: ${noteErr.message}`);
+
+  const chunkText = `From: ${m.sender} | Date: ${noteDate} | Subject: ${m.subject}\n${note.raw_summary}\n${note.free_text || ''}`;
+  const vector = await embed(chunkText);
+  const { error: chunkErr } = await admin.from('note_chunk').insert({
+    user_email,
+    card_id,
+    note_id: noteRow.id,
+    chunk_index: 0,
+    content: chunkText,
+    embedding: vector,
+    embed_model: EMBED_MODEL,
+  });
+  if (chunkErr) throw new Error(`chunk insert: ${chunkErr.message}`);
+}
+
+async function nextNoteId(userEmail, noteDate, source) {
+  const { count } = await admin
+    .from('memory_note')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_email', userEmail)
+    .eq('note_date', noteDate)
+    .eq('source', source);
+  const seq = String((count || 0) + 1).padStart(3, '0');
+  return `${noteDate.replace(/-/g, '')}-${source}-${seq}`;
+}
+
+async function appendRollup(acct, date, kind, entry) {
+  const { user_email, card_id } = acct;
+  const rollupDate = date.toISOString().slice(0, 10);
+  const { data: existing } = await admin
+    .from('daily_rollup')
+    .select('id, entries, entry_count')
+    .eq('user_email', user_email)
+    .eq('card_id', card_id)
+    .eq('rollup_date', rollupDate)
+    .eq('kind', kind)
+    .maybeSingle();
+
+  if (existing) {
+    await admin
+      .from('daily_rollup')
+      .update({
+        entries: [...existing.entries, entry],
+        entry_count: existing.entry_count + 1,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', existing.id);
+  } else {
+    await admin.from('daily_rollup').insert({
+      user_email,
+      card_id,
+      rollup_date: rollupDate,
+      kind,
+      entries: [entry],
+      entry_count: 1,
+    });
+  }
+}
+
+function hhmm(d) {
+  return d.toISOString().slice(11, 16);
+}

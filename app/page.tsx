@@ -826,6 +826,17 @@ function AppShell() {
                 : c,
             ),
           )
+          // Kick off the async 1-year backfill (GitHub Actions worker). This is
+          // fire-and-forget: it registers the account for syncing and queues the
+          // ingestion job. Failure here doesn't affect the scan result already
+          // shown to the user.
+          fetch('/api/gmail/ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ card: cardId }),
+          }).catch(() => {
+            /* non-fatal: backfill can be retried from the dashboard */
+          })
         } catch (e) {
           setGmailNotice(`Gmail scan failed: ${(e as Error).message}`)
           setConnectors((prev) =>
