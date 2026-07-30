@@ -224,3 +224,19 @@ same date can't collide on the unique constraint.
 Tuning: if you still see 429s, lower `INGEST_CONCURRENCY` (repo → Settings →
 Secrets and variables → Actions → Variables). If your provider has generous
 limits (OpenAI), you can raise it (8–10) for more speed.
+
+## Hybrid retrieval (keyword + vector + recency)
+
+Pure vector search misses exact keywords (e.g. "RSVP") and ignores recency, so
+questions like "what's the ask of the latest RSVP email" retrieved
+semantically-near but wrong notes. `match_note_chunks_hybrid`
+(migration 0005) blends three signals:
+  - vector similarity (semantic)
+  - full-text keyword match on chunk content (rescues exact terms; GIN index)
+  - recency (0..1, newest highest), boosted when the question contains
+    latest/recent/last/newest/current.
+
+`ask()` detects recency intent, calls the hybrid RPC with the raw query text,
+orders context newest-first for recency queries, and tells the model to prefer
+the newest relevant note. Setup: run `supabase/migrations/0005_hybrid_retrieval.sql`.
+The old match_note_chunks RPC is left in place (unused by the app now).

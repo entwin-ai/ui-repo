@@ -39,11 +39,21 @@ export async function ask(
 
   const queryEmbedding = await provider.embed(question)
 
-  const { data: matches, error } = await getSupabaseAdmin().rpc('match_note_chunks', {
+  // Detect recency intent ("latest", "recent", "last", "newest", "most recent")
+  // so the retrieval can bias toward newer notes — vector search alone has no
+  // notion of time.
+  const recencyBoost = /\b(latest|most recent|recent|newest|last|current)\b/i.test(question)
+
+  // Hybrid retrieval: vector + keyword + optional recency. Passing the raw
+  // question text powers the keyword arm, which rescues exact terms (e.g. RSVP)
+  // that pure semantic search can miss.
+  const { data: matches, error } = await getSupabaseAdmin().rpc('match_note_chunks_hybrid', {
     p_user_email: userEmail, // HARD user scope
     query_embedding: queryEmbedding,
-    match_count: 12, // higher, since one email can now span several chunks
+    p_query_text: question,
+    match_count: 15,
     p_card_id: cardId,
+    p_recency_boost: recencyBoost,
   })
   if (error) throw new Error(error.message)
 
@@ -51,30 +61,37 @@ export async function ask(
     return { answer: "I couldn't find anything in your email memory about that.", sources: [] }
   }
 
-  // All retrieved chunks feed the LLM as context (more detail = better answers).
-  const context = matches
+  // If the user asked for the "latest/most recent", order the context by date
+  // (newest first) so the model reads the most recent match first.
+  const ordered = recencyBoost
+    ? [...(matches as any[])].sort((a, b) => (a.note_date < b.note_date ? 1 : -1))
+    : (matches as any[])
+
+  const context = ordered
     .map((m: any, i: number) => `[${i + 1}] (${m.note_date}, urgency=${m.urgency})\n${m.content}`)
     .join('\n\n')
 
+  const recencyHint = recencyBoost
+    ? ' The notes are ordered newest-first; when the user asks for the "latest" or "most recent", prefer the newest relevant note.'
+    : ''
+
   const answer = await provider.chatText({
     system:
-      'Answer the question using ONLY the provided email memory notes. Cite sources as [n]. If the notes do not contain the answer, say so plainly.',
+      'Answer the question using ONLY the provided email memory notes. Cite sources as [n]. If the notes do not contain the answer, say so plainly.' +
+      recencyHint,
     user: `Question: ${question}\n\nMemory notes:\n${context}`,
     maxTokens: 1024,
   })
 
-  // Sources shown to the user are deduped by email (gmail_msg_id): several
-  // chunks may come from the same message, but the user should see one link per
-  // email, numbered in first-appearance order.
   const seen = new Set<string>()
   const sources: AskSource[] = []
   let n = 0
-  for (const m of matches as any[]) {
+  for (const m of ordered) {
     const key = m.gmail_msg_id || m.source_url || String(m.note_id)
     if (seen.has(key)) continue
     seen.add(key)
     n += 1
-    sources.push({ n, url: m.source_url, date: m.note_date, urgency: m.urgency, similarity: m.similarity })
+    sources.push({ n, url: m.source_url, date: m.note_date, urgency: m.urgency, similarity: m.score })
   }
 
   return { answer, sources }
