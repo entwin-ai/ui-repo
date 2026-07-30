@@ -64,13 +64,16 @@ const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me'
 
 /** One year of mail, expressed the way Gmail search wants it. */
-function oneYearAgoQuery(): string {
+function windowQuery(): string {
+  // Last 1 year, consistently — computed the same way as the worker's backfill
+  // (worker/src/index.js runBackfill) so the scan count and the backfill
+  // coverage line up. Formatted as Gmail's after:YYYY/MM/DD (raw epoch in
+  // after: is unreliable and silently drops results).
   const d = new Date()
   d.setFullYear(d.getFullYear() - 1)
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
-  // Gmail's newer_than:1y also works, but an explicit after: date is clearer.
   return `after:${y}/${m}/${day}`
 }
 
@@ -440,13 +443,13 @@ async function ensureAccessToken(
  * (MAX_PAGES). If the cap is hit, the returned count is a lower bound and
  * `capped` is true, so the caller can label the number as "at least N".
  */
-const MAX_PAGES = 20 // 20 * 500 = up to 10,000 messages per label before capping
+const MAX_PAGES = 120 // 120 * 500 = up to 60,000 messages per label before capping
 
 async function countLabel(
   accessToken: string,
   labelId: 'INBOX' | 'SENT',
 ): Promise<{ count: number; capped: boolean }> {
-  const q = oneYearAgoQuery()
+  const q = windowQuery()
   let pageToken: string | undefined
   let total = 0
   let pages = 0
@@ -454,7 +457,7 @@ async function countLabel(
   do {
     const listUrl = new URL(`${GMAIL_API}/messages`)
     listUrl.searchParams.set('labelIds', labelId)
-    listUrl.searchParams.set('q', q)
+    if (q) listUrl.searchParams.set('q', q)
     listUrl.searchParams.set('maxResults', '500')
     // Only ids are needed for a count; this keeps the payload minimal.
     listUrl.searchParams.set('fields', 'messages/id,nextPageToken')

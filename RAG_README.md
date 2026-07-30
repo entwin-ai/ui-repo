@@ -142,3 +142,58 @@ to the user are deduped by email** so one message = one citation link.
 Note: this increases embedding calls per email (one per chunk). If you re-parse
 existing mail to pick up full-body chunks, clear old rows first (delete the
 user's `email_message` rows with the reprocess query) and re-run the backfill.
+
+## Wiki RAG + relationship graph (entity layer)
+
+Built entirely from EXISTING data — no email is stored twice, nothing goes to
+cloud drive. The raw material is `memory_note.related_entities`, already
+captured at ingestion.
+
+New pieces:
+- **`entity`** table — one canonical row per resolved person/org (name, aliases,
+  first/last seen). This is the identity layer the Resolver produces.
+- **`entity_mention`** — join table (entity ↔ note); this is the v4 "Memory Note
+  References" list and drives bubble size.
+- **Resolver** (`worker/src/lib/resolver.js`) — deterministic alias matching:
+  normalizes each related_entities string and either matches an existing entity
+  or creates one. Runs live during ingestion AND as a one-shot backfill over
+  notes you already have.
+- **RPCs**: `entity_graph_nodes` (entities + bubble size), `entity_graph_edges`
+  (co-occurrence edges), `match_entity_chunks` (entity-scoped wiki retrieval).
+- **Routes**: `GET /api/graph` (nodes+edges), `POST /api/wiki` (entity-scoped
+  answer). The Memory view renders the real graph; click a node for its wiki.
+
+Setup:
+1. Run `supabase/migrations/0004_entity_layer.sql`.
+2. Build the entity layer from existing notes: Actions → **entity-backfill** →
+   Run workflow. (No Gmail/LLM needed — pure DB transform. Add secrets
+   SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY, already in the `ingestion` env.)
+3. New ingestions populate entities automatically from then on.
+
+Limitation: alias matching is deterministic (exact normalized-name match). It
+merges case/spacing/email variants but not abbreviations ("S. Dasgupta" vs
+"Subhankar Dasgupta") — the v4 "uncertain match → pending review" rule is not yet
+implemented, by design, to avoid silently merging wrong.
+
+## Backfill coverage fix + token usage display
+
+**Window: last 1 year, consistently.** Both the scan (`lib/gmail/service.ts`
+windowQuery) and the worker backfill (`worker/src/index.js` runBackfill) compute
+"one year ago" the same way and format it as Gmail's `after:YYYY/MM/DD`. This is
+the single source of the earlier mismatch's fixes:
+  - the backfill previously used `after:<raw epoch>` (unreliable, dropped
+    results) and no label filter; it now uses the same YYYY/MM/DD date and
+    enumerates INBOX + SENT as two label passes, matching the scan.
+  - a message in both labels is de-duped by the ledger's unique
+    (user_email, gmail_msg_id).
+  - backfill_cursor encodes `LABEL:pageToken` so a run that hits the time cap
+    resumes across both labels.
+
+Note: Gmail's search listing is thread/conversation-indexed, so the parsed count
+can differ from a label's raw total by a small margin — but scan and backfill now
+report the same 1-year window.
+
+**Token usage on screen:** `GET /api/usage` aggregates llm_cost_log (one row per
+LLM call, all providers) into total input/output tokens plus a per-call-kind
+breakdown. Dashboard → Overview shows live "Input Tokens" / "Output Tokens"
+cards that refresh every 15s while a backfill runs.

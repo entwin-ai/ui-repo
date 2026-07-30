@@ -4,6 +4,7 @@ import { cleanBody, contentHash } from '../lib/clean.js';
 import { classify } from '../lib/classify.js';
 import { writeMemoryNote, extractEntities, updatesSummary } from '../lib/prompts.js';
 import { chunkText } from '../lib/chunk.js';
+import { resolveEntitiesForNote } from '../lib/resolver.js';
 
 // Process ONE Gmail message for an account. `acct` = { user_email, card_id }.
 // `provider` is the user's bound LLM provider (from makeProvider). user_email is
@@ -132,6 +133,15 @@ async function runMemoryPipeline(acct, provider, msgRow, m) {
     .select()
     .single();
   if (noteErr) throw new Error(`note insert: ${noteErr.message}`);
+
+  // Resolver (v4): turn the raw related_entities into canonical entities and
+  // record mentions — this builds the graph/wiki layer from data we already
+  // have. Non-fatal: a resolver hiccup shouldn't block the note's embedding.
+  try {
+    await resolveEntitiesForNote(user_email, noteRow.id, related, noteDate);
+  } catch (err) {
+    console.error(`[${user_email}] resolver:`, err.message);
+  }
 
   // Full-body RAG: embed the actual cleaned email body, chunked, so specific
   // facts are retrievable — not just the LLM summary. The first chunk carries a

@@ -9,8 +9,9 @@ import {
   currentHistoryId,
 } from './lib/gmail.js';
 import { ingestMessage } from './pipeline/ingest.js';
+import { backfillEntities } from './entity-backfill.js';
 
-const MODE = process.env.MODE || 'delta'; // backfill | delta
+const MODE = process.env.MODE || 'delta'; // backfill | delta | entity-backfill
 const ONLY_USER = process.env.ONLY_USER || null; // optional single-user run
 const ONLY_CARD = process.env.ONLY_CARD || null; // optional single-card run
 
@@ -35,23 +36,51 @@ async function tokenFor(acct) {
 }
 
 async function runBackfill(acct, accessToken, provider) {
-  const oneYearAgo = Math.floor(Date.now() / 1000) - 365 * 24 * 3600;
-  for await (const { ids, nextPageToken } of listMessageIds(accessToken, {
-    afterEpochSec: oneYearAgo,
-    pageToken: acct.backfill_cursor || undefined,
-  })) {
-    for (const id of ids) {
-      try {
-        await ingestMessage(accessToken, acct, provider, id);
-      } catch (err) {
-        console.error(`[${acct.user_email}/${acct.card_id}] msg ${id}:`, err.message);
-      }
-    }
-    await admin
-      .from('sync_state')
-      .update({ backfill_cursor: nextPageToken, updated_at: new Date().toISOString() })
-      .eq('id', acct.id);
+  // Backfill window: the last 1 year, consistently. Computed the same way as the
+  // scan (see windowQuery in lib/gmail/service.ts) so scan counts and backfill
+  // coverage line up. The date is formatted as after:YYYY/MM/DD by listMessageIds.
+  const afterDate = new Date();
+  afterDate.setFullYear(afterDate.getFullYear() - 1);
+
+  // Enumerate the SAME two labels the scan counts (INBOX + SENT), so backfill
+  // coverage matches the scan's numbers. A message in both labels is de-duped
+  // downstream by the ledger's unique (user_email, gmail_msg_id).
+  const labels = ['INBOX', 'SENT'];
+  // Resume support: backfill_cursor is stored as "LABEL:pageToken". If present,
+  // start from that label; otherwise start at the first label.
+  let startLabelIdx = 0;
+  let startToken;
+  if (acct.backfill_cursor && acct.backfill_cursor.includes(':')) {
+    const [lbl, tok] = acct.backfill_cursor.split(/:(.+)/);
+    const idx = labels.indexOf(lbl);
+    if (idx >= 0) { startLabelIdx = idx; startToken = tok || undefined; }
   }
+
+  for (let li = startLabelIdx; li < labels.length; li++) {
+    const labelId = labels[li];
+    const pageToken = li === startLabelIdx ? startToken : undefined;
+    for await (const { ids, nextPageToken } of listMessageIds(accessToken, {
+      afterDate,
+      labelId,
+      pageToken,
+    })) {
+      for (const id of ids) {
+        try {
+          await ingestMessage(accessToken, acct, provider, id);
+        } catch (err) {
+          console.error(`[${acct.user_email}/${acct.card_id}] msg ${id}:`, err.message);
+        }
+      }
+      await admin
+        .from('sync_state')
+        .update({
+          backfill_cursor: `${labelId}:${nextPageToken || ''}`,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', acct.id);
+    }
+  }
+
   const hid = await currentHistoryId(accessToken);
   await admin
     .from('sync_state')
@@ -79,6 +108,14 @@ async function runDelta(acct, accessToken, provider) {
 }
 
 async function main() {
+  // Entity backfill reuses existing memory_notes — no Gmail token, no LLM key,
+  // no per-account loop needed. Handle it up front and return.
+  if (MODE === 'entity-backfill') {
+    console.log('MODE=entity-backfill (building entity layer from existing notes)');
+    await backfillEntities();
+    return;
+  }
+
   const list = await accounts();
   console.log(`MODE=${MODE} accounts=${list.length}`);
   for (const acct of list) {

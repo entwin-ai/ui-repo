@@ -46,19 +46,32 @@ async function gget(url, accessToken) {
   });
 }
 
-// Backfill: page message ids after an epoch-seconds date.
-export async function* listMessageIds(accessToken, { afterEpochSec, pageToken }) {
+// Format a date as Gmail's search-friendly YYYY/MM/DD (raw epoch in `after:` is
+// unreliable and silently drops results — this must match the scan's format).
+function ymd(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}/${m}/${d}`;
+}
+
+// Backfill: page message ids for a given label (INBOX or SENT), after a date.
+// Enumerating PER LABEL with the same after:YYYY/MM/DD the scan uses is what
+// makes the backfill's coverage match the scan's counts.
+export async function* listMessageIds(accessToken, { afterDate, labelId, pageToken }) {
   let token = pageToken || undefined;
+  const afterStr = ymd(afterDate);
   do {
     const url = new URL(`${GMAIL_API}/messages`);
-    url.searchParams.set('q', `after:${afterEpochSec}`);
+    url.searchParams.set('q', `after:${afterStr}`);
+    if (labelId) url.searchParams.set('labelIds', labelId);
     url.searchParams.set('maxResults', '100');
     url.searchParams.set('fields', 'messages/id,nextPageToken');
     if (token) url.searchParams.set('pageToken', token);
     const page = await gget(url.toString(), accessToken);
     const ids = (page.messages || []).map((m) => m.id);
     token = page.nextPageToken || null;
-    yield { ids, nextPageToken: token };
+    yield { ids, nextPageToken: token, labelId };
   } while (token);
 }
 

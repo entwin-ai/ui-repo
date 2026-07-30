@@ -79,3 +79,56 @@ export async function ask(
 
   return { answer, sources }
 }
+
+/**
+ * Wiki RAG: "what do I know about entity X?" Retrieves chunks only from notes
+ * that mention the given entity (via match_entity_chunks), then answers with the
+ * user's LLM. Same isolation guarantees as ask().
+ */
+export async function askEntity(
+  userEmail: string,
+  entityId: string,
+  question: string,
+): Promise<AskResult> {
+  const config = await getLlmConfig(userEmail)
+  if (!config) throw new NoLlmKeyError()
+  const provider = makeProvider(config)
+
+  const queryEmbedding = await provider.embed(question)
+
+  const { data: matches, error } = await getSupabaseAdmin().rpc('match_entity_chunks', {
+    p_user_email: userEmail,
+    p_entity_id: entityId,
+    query_embedding: queryEmbedding,
+    match_count: 12,
+  })
+  if (error) throw new Error(error.message)
+
+  if (!matches || matches.length === 0) {
+    return { answer: "I don't have anything in your email memory about that yet.", sources: [] }
+  }
+
+  const context = (matches as any[])
+    .map((m, i) => `[${i + 1}] (${m.note_date}, urgency=${m.urgency})\n${m.content}`)
+    .join('\n\n')
+
+  const answer = await provider.chatText({
+    system:
+      'You are summarising what the user knows about a specific person or organisation, using ONLY the provided email memory notes. Cite sources as [n]. If the notes do not answer, say so plainly.',
+    user: `Question: ${question}\n\nMemory notes:\n${context}`,
+    maxTokens: 1024,
+  })
+
+  const seen = new Set<string>()
+  const sources: AskSource[] = []
+  let n = 0
+  for (const m of matches as any[]) {
+    const key = m.gmail_msg_id || m.source_url || String(m.note_id)
+    if (seen.has(key)) continue
+    seen.add(key)
+    n += 1
+    sources.push({ n, url: m.source_url, date: m.note_date, urgency: m.urgency, similarity: m.similarity })
+  }
+
+  return { answer, sources }
+}

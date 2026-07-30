@@ -522,7 +522,27 @@ function EntitiesPanel({ entities, setEntities }: { entities: Entity[]; setEntit
   )
 }
 
+interface Usage { inputTokens: number; outputTokens: number; calls: number; byKind: Record<string, { calls: number; input: number; output: number }> }
+
 function OverviewPanel({ connectedCount, total, alertVisible, dismissAlert }: { connectedCount: number; total: number; alertVisible: boolean; dismissAlert: () => void }) {
+  const [usage, setUsage] = useState<Usage | null>(null)
+  const [usageErr, setUsageErr] = useState('')
+
+  useEffect(() => {
+    const load = () => {
+      fetch('/api/usage')
+        .then((r) => r.json())
+        .then((d) => { if (d.error) setUsageErr(d.error); else setUsage(d) })
+        .catch((e) => setUsageErr(String(e)))
+    }
+    load()
+    // refresh periodically so counts climb while a backfill runs
+    const t = setInterval(load, 15000)
+    return () => clearInterval(t)
+  }, [])
+
+  const fmt = (n: number) => n.toLocaleString()
+
   return (
     <div className="dash-panel active" id="dash-overview">
       <div className="stat-grid" style={{ marginBottom: 20 }}>
@@ -573,24 +593,25 @@ function OverviewPanel({ connectedCount, total, alertVisible, dismissAlert }: { 
         </div>
       </div>
 
-      <div className="section-heading">Token spend, this month</div>
+      <div className="section-heading">Token usage {usage ? `(${fmt(usage.calls)} LLM calls)` : ''}</div>
+      {usageErr && <div className="stat-sub" style={{ color: '#e53935' }}>Couldn’t load usage: {usageErr}</div>}
       <div className="stat-grid">
         <div className="stat-card">
-          <div className="stat-label">Running cost</div>
-          <div className="stat-value">$4.82</div>
+          <div className="stat-label">Input Tokens</div>
+          <div className="stat-value">{usage ? fmt(usage.inputTokens) : '—'}</div>
           <div className="stat-breakdown">
-            <div className="stat-breakdown-row"><span>write_note</span><span>$2.91</span></div>
-            <div className="stat-breakdown-row"><span>extract_entities</span><span>$1.48</span></div>
-            <div className="stat-breakdown-row"><span>summarize_update</span><span>$0.43</span></div>
+            {usage && Object.entries(usage.byKind).map(([k, v]) => (
+              <div className="stat-breakdown-row" key={k}><span>{k}</span><span>{fmt(v.input)}</span></div>
+            ))}
           </div>
         </div>
         <div className="stat-card">
-          <div className="stat-label">Average latency</div>
-          <div className="stat-value">1.1s</div>
+          <div className="stat-label">Output Tokens</div>
+          <div className="stat-value">{usage ? fmt(usage.outputTokens) : '—'}</div>
           <div className="stat-breakdown">
-            <div className="stat-breakdown-row"><span>write_note</span><span>1.4s</span></div>
-            <div className="stat-breakdown-row"><span>extract_entities</span><span>0.9s</span></div>
-            <div className="stat-breakdown-row"><span>summarize_update</span><span>0.6s</span></div>
+            {usage && Object.entries(usage.byKind).map(([k, v]) => (
+              <div className="stat-breakdown-row" key={k}><span>{k}</span><span>{fmt(v.output)}</span></div>
+            ))}
           </div>
         </div>
       </div>
@@ -642,9 +663,18 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
 
 /* ---------------- Memory view ---------------- */
 
+interface GraphNode { id: string; name: string; type: string; size: number }
+interface GraphEdge { source: string; target: string; weight: number }
+
 function MemoryGraph() {
   const containerRef = useRef<HTMLDivElement>(null)
   const [dims, setDims] = useState({ width: 500, height: 400 })
+  const [nodes, setNodes] = useState<GraphNode[]>([])
+  const [edges, setEdges] = useState<GraphEdge[]>([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState('')
+  const [selected, setSelected] = useState<GraphNode | null>(null)
+  const [wiki, setWiki] = useState<{ answer: string; loading: boolean } | null>(null)
 
   useEffect(() => {
     if (containerRef.current) {
@@ -653,30 +683,92 @@ function MemoryGraph() {
     }
   }, [])
 
+  useEffect(() => {
+    fetch('/api/graph')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.error) { setErr(d.error); return }
+        setNodes(d.nodes || [])
+        setEdges(d.edges || [])
+      })
+      .catch((e) => setErr(String(e)))
+      .finally(() => setLoading(false))
+  }, [])
+
   const { width, height } = dims
-  const nodes = [
-    { id: 'jorge', label: 'Jorge Alvarez', type: 'person', x: width * 0.35, y: height * 0.4 },
-    { id: 'q3-plan', label: 'Q3 planning', type: 'topic', x: width * 0.6, y: height * 0.3 },
-    { id: 'standup', label: 'Weekly standup', type: 'event', x: width * 0.55, y: height * 0.6 },
-  ]
-  const edges: [string, string][] = [['jorge', 'q3-plan'], ['jorge', 'standup']]
-  const nodeColors: Record<string, string> = { person: 'var(--blue)', topic: 'var(--bronze)', event: 'var(--gold)' }
-  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]))
+
+  // Simple deterministic circular layout, largest bubbles toward the centre.
+  const sorted = [...nodes].sort((a, b) => b.size - a.size)
+  const positioned = sorted.map((n, i) => {
+    if (i === 0 && sorted.length > 1) {
+      return { ...n, x: width / 2, y: height / 2 }
+    }
+    const ring = i === 0 ? 0 : 1 + Math.floor((i - 1) / 8)
+    const inRing = i === 0 ? 0 : (i - 1) % 8
+    const radius = ring * Math.min(width, height) * 0.16
+    const angle = (inRing / 8) * Math.PI * 2 + ring
+    return { ...n, x: width / 2 + Math.cos(angle) * radius, y: height / 2 + Math.sin(angle) * radius }
+  })
+  const byId = Object.fromEntries(positioned.map((n) => [n.id, n]))
+
+  const maxSize = Math.max(1, ...nodes.map((n) => n.size))
+  const radiusFor = (size: number) => 6 + (size / maxSize) * 18
+  const nodeColor = (type: string) => (type === 'organisation' ? 'var(--bronze)' : 'var(--blue)')
+
+  async function openEntity(n: GraphNode) {
+    setSelected(n)
+    setWiki({ answer: '', loading: true })
+    try {
+      const res = await fetch('/api/wiki', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entityId: n.id }),
+      })
+      const d = await res.json()
+      setWiki({ answer: d.error ? `Error: ${d.error}` : d.answer, loading: false })
+    } catch (e) {
+      setWiki({ answer: `Error: ${(e as Error).message}`, loading: false })
+    }
+  }
 
   return (
-    <div id="memory-graph-container" ref={containerRef}>
-      <svg width={width} height={height}>
-        {edges.map(([a, b], i) => (
-          <line key={i} className="memory-edge" x1={byId[a].x} y1={byId[a].y} x2={byId[b].x} y2={byId[b].y} />
-        ))}
-        {nodes.map((n) => (
-          <g key={n.id} transform={`translate(${n.x},${n.y})`}>
-            <circle r={7} fill={nodeColors[n.type]} />
-            <text className="memory-node-label" textAnchor="middle" dy={-12}>{n.label}</text>
-          </g>
-        ))}
-      </svg>
-      <div className="memory-empty-note">Illustrative sample below. Empty by design until real entities exist.</div>
+    <div id="memory-graph-container" ref={containerRef} style={{ position: 'relative' }}>
+      {loading && <div className="memory-empty-note">Loading your memory graph…</div>}
+      {err && <div className="memory-empty-note" style={{ color: '#e53935' }}>Couldn’t load graph: {err}</div>}
+      {!loading && !err && nodes.length === 0 && (
+        <div className="memory-empty-note">No entities yet. Once your email is parsed and the entity layer is built, people and organisations you interact with will appear here.</div>
+      )}
+
+      {nodes.length > 0 && (
+        <svg width={width} height={height}>
+          {edges.map((e, i) => {
+            const a = byId[e.source], b = byId[e.target]
+            if (!a || !b) return null
+            return <line key={i} className="memory-edge" x1={a.x} y1={a.y} x2={b.x} y2={b.y} strokeWidth={Math.min(1 + e.weight * 0.4, 4)} />
+          })}
+          {positioned.map((n) => (
+            <g key={n.id} transform={`translate(${n.x},${n.y})`} style={{ cursor: 'pointer' }} onClick={() => openEntity(n)}>
+              <circle r={radiusFor(n.size)} fill={nodeColor(n.type)} opacity={selected?.id === n.id ? 1 : 0.85} />
+              <text className="memory-node-label" textAnchor="middle" dy={-radiusFor(n.size) - 4}>{n.name}</text>
+            </g>
+          ))}
+        </svg>
+      )}
+
+      {selected && (
+        <div style={{ position: 'absolute', right: 12, top: 12, width: 320, maxHeight: height - 24, overflow: 'auto', background: 'var(--card, #fff)', border: '1px solid var(--border, #e5e5e5)', borderRadius: 10, padding: 14, boxShadow: '0 4px 18px rgba(0,0,0,0.12)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <strong>{selected.name}</strong>
+            <button onClick={() => { setSelected(null); setWiki(null) }} style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 18 }}>×</button>
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+            {selected.type} · mentioned in {selected.size} note{selected.size === 1 ? '' : 's'}
+          </div>
+          <div style={{ fontSize: 14, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+            {wiki?.loading ? 'Reading everything about them from your email…' : wiki?.answer}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
