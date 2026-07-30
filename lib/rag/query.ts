@@ -42,7 +42,7 @@ export async function ask(
   const { data: matches, error } = await getSupabaseAdmin().rpc('match_note_chunks', {
     p_user_email: userEmail, // HARD user scope
     query_embedding: queryEmbedding,
-    match_count: 8,
+    match_count: 12, // higher, since one email can now span several chunks
     p_card_id: cardId,
   })
   if (error) throw new Error(error.message)
@@ -51,6 +51,7 @@ export async function ask(
     return { answer: "I couldn't find anything in your email memory about that.", sources: [] }
   }
 
+  // All retrieved chunks feed the LLM as context (more detail = better answers).
   const context = matches
     .map((m: any, i: number) => `[${i + 1}] (${m.note_date}, urgency=${m.urgency})\n${m.content}`)
     .join('\n\n')
@@ -62,14 +63,19 @@ export async function ask(
     maxTokens: 1024,
   })
 
-  return {
-    answer,
-    sources: matches.map((m: any, i: number) => ({
-      n: i + 1,
-      url: m.source_url,
-      date: m.note_date,
-      urgency: m.urgency,
-      similarity: m.similarity,
-    })),
+  // Sources shown to the user are deduped by email (gmail_msg_id): several
+  // chunks may come from the same message, but the user should see one link per
+  // email, numbered in first-appearance order.
+  const seen = new Set<string>()
+  const sources: AskSource[] = []
+  let n = 0
+  for (const m of matches as any[]) {
+    const key = m.gmail_msg_id || m.source_url || String(m.note_id)
+    if (seen.has(key)) continue
+    seen.add(key)
+    n += 1
+    sources.push({ n, url: m.source_url, date: m.note_date, urgency: m.urgency, similarity: m.similarity })
   }
+
+  return { answer, sources }
 }

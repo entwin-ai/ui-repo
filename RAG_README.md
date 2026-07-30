@@ -124,3 +124,21 @@ via `/api/ask`.
 `related_entities` is stored now. The Entity-file layer, Memory Note References,
 bubble sizing, and the alias Resolver are the wiki-RAG scope and read from
 `memory_note.related_entities` when you build them — no re-ingestion.
+
+
+## Retrieval granularity: full-body chunks
+
+The RAG layer embeds the **full cleaned email body**, not just the LLM summary.
+Long bodies are split into overlapping ~2800-char chunks (`worker/src/lib/chunk.js`);
+each chunk becomes one `note_chunk` row (incrementing `chunk_index`). The first
+chunk is prefixed with a context header (sender/date/subject + summary) so a
+match on it still has framing. This makes specific facts inside an email
+retrievable, not only what the summary happened to capture.
+
+At query time (`/api/ask`) `match_count` is 12 (a single email can span several
+chunks), all retrieved chunks feed the LLM as context, and the **sources shown
+to the user are deduped by email** so one message = one citation link.
+
+Note: this increases embedding calls per email (one per chunk). If you re-parse
+existing mail to pick up full-body chunks, clear old rows first (delete the
+user's `email_message` rows with the reprocess query) and re-run the backfill.

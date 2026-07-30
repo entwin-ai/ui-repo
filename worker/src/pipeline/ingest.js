@@ -3,6 +3,7 @@ import { getMessage, extractParts } from '../lib/gmail.js';
 import { cleanBody, contentHash } from '../lib/clean.js';
 import { classify } from '../lib/classify.js';
 import { writeMemoryNote, extractEntities, updatesSummary } from '../lib/prompts.js';
+import { chunkText } from '../lib/chunk.js';
 
 // Process ONE Gmail message for an account. `acct` = { user_email, card_id }.
 // `provider` is the user's bound LLM provider (from makeProvider). user_email is
@@ -132,18 +133,30 @@ async function runMemoryPipeline(acct, provider, msgRow, m) {
     .single();
   if (noteErr) throw new Error(`note insert: ${noteErr.message}`);
 
-  const chunkText = `From: ${m.sender} | Date: ${noteDate} | Subject: ${m.subject}\n${note.raw_summary}\n${note.free_text || ''}`;
-  const vector = await provider.embed(chunkText);
-  const { error: chunkErr } = await admin.from('note_chunk').insert({
-    user_email,
-    card_id,
-    note_id: noteRow.id,
-    chunk_index: 0,
-    content: chunkText,
-    embedding: vector,
-    embed_model: `${provider.provider}:${provider.model}`,
-  });
-  if (chunkErr) throw new Error(`chunk insert: ${chunkErr.message}`);
+  // Full-body RAG: embed the actual cleaned email body, chunked, so specific
+  // facts are retrievable — not just the LLM summary. The first chunk carries a
+  // context header (sender/date/subject + summary) so a match on chunk 0 still
+  // has the framing; later chunks are raw body continuation.
+  const header = `From: ${m.sender} | Date: ${noteDate} | Subject: ${m.subject}\nSummary: ${note.raw_summary}`;
+  const bodyChunks = chunkText(m.body);
+  // If the body was empty for some reason, fall back to the summary alone so the
+  // note is still retrievable.
+  const pieces = bodyChunks.length > 0 ? bodyChunks : [note.raw_summary || m.subject];
+
+  for (let i = 0; i < pieces.length; i++) {
+    const content = i === 0 ? `${header}\n\n${pieces[i]}` : pieces[i];
+    const vector = await provider.embed(content);
+    const { error: chunkErr } = await admin.from('note_chunk').insert({
+      user_email,
+      card_id,
+      note_id: noteRow.id,
+      chunk_index: i,
+      content,
+      embedding: vector,
+      embed_model: `${provider.provider}:${provider.model}`,
+    });
+    if (chunkErr) throw new Error(`chunk insert (${i}): ${chunkErr.message}`);
+  }
 }
 
 async function nextNoteId(userEmail, noteDate, source) {
