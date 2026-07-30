@@ -33,6 +33,13 @@ with per-vendor adapters, so adding a provider is one adapter, not a pipeline
 change. Embeddings from any provider are normalized to 1536 dims to fit the
 fixed `vector(1536)` column.
 
+Embedding model names are **config-driven** (not hardcoded): the worker and app
+read `CLAUDE_EMBED_MODEL`, `OPENAI_EMBED_MODEL`, `GEMINI_EMBED_MODEL` from the
+environment, falling back to current defaults (`voyage-3`,
+`text-embedding-3-small`, `gemini-embedding-001`). If a provider renames or
+retires an embedding model, change the env var — no code change. Set the same
+values in Vercel and the GitHub `ingestion` environment.
+
 The key is **write-only** from the browser's perspective: after saving, no
 endpoint ever returns it. The app and worker share one secret,
 `ENTWIN_KEY_SECRET`, used only to encrypt/decrypt these per-user keys — neither

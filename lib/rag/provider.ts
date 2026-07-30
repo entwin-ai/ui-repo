@@ -26,10 +26,12 @@ const CHAT_MODEL_ID: Record<LlmProvider, Record<string, string>> = {
   },
 }
 
+// Embedding model per provider — config-driven (Option A). Override via env
+// vars; fallbacks are current sensible defaults.
 const EMBED_MODEL_ID: Record<LlmProvider, string> = {
-  claude: 'voyage-3',
-  openai: 'text-embedding-3-small',
-  gemini: 'text-embedding-004',
+  claude: process.env.CLAUDE_EMBED_MODEL || 'voyage-3',
+  openai: process.env.OPENAI_EMBED_MODEL || 'text-embedding-3-small',
+  gemini: process.env.GEMINI_EMBED_MODEL || 'gemini-embedding-001',
 }
 
 function resolveChatModel(provider: LlmProvider, label: string): string {
@@ -136,7 +138,7 @@ async function geminiEmbed(apiKey: string, text: string): Promise<number[]> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: `models/${EMBED_MODEL_ID.gemini}`, content: { parts: [{ text }] } }),
+    body: JSON.stringify({ content: { parts: [{ text }] } }),
   })
   if (!res.ok) throw new Error(`gemini-embed ${res.status}`)
   const j = await res.json()

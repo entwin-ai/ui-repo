@@ -27,10 +27,13 @@ const CHAT_MODEL_ID = {
   },
 };
 
+// Embedding model per provider — CONFIG-DRIVEN (Option A). Override any of these
+// via env vars without a code change; the fallbacks are current sensible
+// defaults. This is the one place model names live for embeddings.
 const EMBED_MODEL_ID = {
-  claude: 'voyage-3', // Anthropic has no first-party embeddings; Voyage is the documented pairing
-  openai: 'text-embedding-3-small',
-  gemini: 'text-embedding-004',
+  claude: process.env.CLAUDE_EMBED_MODEL || 'voyage-3',
+  openai: process.env.OPENAI_EMBED_MODEL || 'text-embedding-3-small',
+  gemini: process.env.GEMINI_EMBED_MODEL || 'gemini-embedding-001',
 };
 
 function resolveChatModel(provider, label) {
@@ -155,7 +158,6 @@ const gemini = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: `models/${EMBED_MODEL_ID.gemini}`,
         content: { parts: [{ text }] },
       }),
     });

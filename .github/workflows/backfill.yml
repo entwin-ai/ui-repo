@@ -45,4 +45,9 @@ jobs:
           # LLM keys are per-user now, read from Redis by the worker.
           # This secret decrypts them (shared with the app).
           ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
+          # Optional embedding-model overrides (Option A). Safe to omit —
+          # the worker falls back to sensible defaults if these are unset.
+          CLAUDE_EMBED_MODEL: ${{ secrets.CLAUDE_EMBED_MODEL }}
+          OPENAI_EMBED_MODEL: ${{ secrets.OPENAI_EMBED_MODEL }}
+          GEMINI_EMBED_MODEL: ${{ secrets.GEMINI_EMBED_MODEL }}
         run: npm start
