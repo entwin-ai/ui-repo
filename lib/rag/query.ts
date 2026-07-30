@@ -1,4 +1,4 @@
-import { supabaseAdmin } from './supabase'
+import { getSupabaseAdmin } from './supabase'
 import { getLlmConfig } from './llm-keys'
 import { makeProvider } from './provider'
 
@@ -39,7 +39,7 @@ export async function ask(
 
   const queryEmbedding = await provider.embed(question)
 
-  const { data: matches, error } = await supabaseAdmin.rpc('match_note_chunks', {
+  const { data: matches, error } = await getSupabaseAdmin().rpc('match_note_chunks', {
     p_user_email: userEmail, // HARD user scope
     query_embedding: queryEmbedding,
     match_count: 8,

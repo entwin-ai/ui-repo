@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUser, isGmailCard } from '@/lib/gmail/route-helpers'
 import { disconnect } from '@/lib/gmail/service'
-import { supabaseAdmin } from '@/lib/rag/supabase'
+import { getSupabaseAdmin } from '@/lib/rag/supabase'
 
 export const dynamic = 'force-dynamic'
 
@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
   await disconnect(auth.email, card)
   // Stop future syncs for this account. Ingested notes are left intact; delete
   // them explicitly via a data-removal action if the user asks.
-  await supabaseAdmin
+  await getSupabaseAdmin()
     .from('sync_state')
     .delete()
     .eq('user_email', auth.email)

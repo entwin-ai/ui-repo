@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUser, isGmailCard } from '@/lib/gmail/route-helpers'
-import { supabaseAdmin } from '@/lib/rag/supabase'
+import { getSupabaseAdmin } from '@/lib/rag/supabase'
 
 export const dynamic = 'force-dynamic'
 
@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
   }
 
   // 1. Ensure the sync_state row exists (idempotent upsert).
-  const { error: upErr } = await supabaseAdmin.from('sync_state').upsert(
+  const { error: upErr } = await getSupabaseAdmin().from('sync_state').upsert(
     { user_email: auth.email, card_id: card, backfill_done: false },
     { onConflict: 'user_email,card_id' },
   )

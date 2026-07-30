@@ -179,33 +179,62 @@ function LoginScreen() {
 
 /* ---------------- Chat view ---------------- */
 
-interface ChatMsg { role: 'user' | 'assistant'; text: string }
+interface AskSource { n: number; url: string | null; date: string | null; urgency: string | null }
+interface ChatMsg { role: 'user' | 'assistant'; text: string; sources?: AskSource[]; error?: boolean }
 
 function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: number }) {
   const [messages, setMessages] = useState<ChatMsg[]>([
-    { role: 'assistant', text: 'Hi. This is a frontend check, not a live model — messages you send here are echoed locally so you can test the layout and interactions.' },
+    { role: 'assistant', text: 'Hi, I\u2019m Entwin. Ask me anything about your email \u2014 what\u2019s outstanding, who\u2019s waiting on you, upcoming payments or deadlines \u2014 and I\u2019ll answer from your vault.' },
   ])
   const [value, setValue] = useState('')
+  const [pending, setPending] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (resetKey > 0) setMessages([{ role: 'assistant', text: 'New chat started.' }])
+    if (resetKey > 0) setMessages([{ role: 'assistant', text: 'New chat started. What would you like to know?' }])
   }, [resetKey])
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
-  }, [messages])
+  }, [messages, pending])
 
-  const send = () => {
+  const send = async () => {
     const text = value.trim()
-    if (!text) return
+    if (!text || pending) return
     setMessages((m) => [...m, { role: 'user', text }])
     setValue('')
     if (taRef.current) taRef.current.style.height = 'auto'
-    setTimeout(() => {
-      setMessages((m) => [...m, { role: 'assistant', text: `This is a placeholder reply from ${currentModel}. Connect a backend in Settings to get real answers from the vault.` }])
-    }, 350)
+    setPending(true)
+
+    try {
+      const res = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: text }),
+      })
+      const data = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        // Distinguish the "no LLM key set" case so the user knows to fix Settings.
+        const msg = data.needsKey
+          ? 'I don\u2019t have an LLM key configured yet. Add your provider and API key in Settings, then ask again.'
+          : `Sorry \u2014 I couldn\u2019t answer that. ${data.error || `(error ${res.status})`}`
+        setMessages((m) => [...m, { role: 'assistant', text: msg, error: true }])
+      } else {
+        setMessages((m) => [
+          ...m,
+          { role: 'assistant', text: data.answer || 'No answer returned.', sources: data.sources || [] },
+        ])
+      }
+    } catch (e) {
+      setMessages((m) => [
+        ...m,
+        { role: 'assistant', text: `Network error: ${(e as Error).message}`, error: true },
+      ])
+    } finally {
+      setPending(false)
+    }
   }
 
   return (
@@ -214,9 +243,28 @@ function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: 
         {messages.map((m, i) => (
           <div className={`msg ${m.role}`} key={i}>
             <div className="role-label">{m.role === 'user' ? 'You' : 'Entwin'}</div>
-            <div className="bubble">{m.text}</div>
+            <div className="bubble" style={m.error ? { color: '#e53935' } : undefined}>{m.text}</div>
+            {m.sources && m.sources.length > 0 && (
+              <div className="msg-sources" style={{ marginTop: 6, fontSize: 12, opacity: 0.8, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {m.sources.map((s) => (
+                  s.url ? (
+                    <a key={s.n} href={s.url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+                      [{s.n}] {s.date || 'email'}{s.urgency ? ` \u00b7 ${s.urgency}` : ''}
+                    </a>
+                  ) : (
+                    <span key={s.n}>[{s.n}] {s.date || 'email'}</span>
+                  )
+                ))}
+              </div>
+            )}
           </div>
         ))}
+        {pending && (
+          <div className="msg assistant">
+            <div className="role-label">Entwin</div>
+            <div className="bubble">Searching your vault\u2026</div>
+          </div>
+        )}
       </div>
       <div className="chat-input-wrap">
         <div className="chat-input-box">
@@ -226,6 +274,7 @@ function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: 
             rows={1}
             placeholder="Message Entwin..."
             value={value}
+            disabled={pending}
             onChange={(e) => {
               setValue(e.target.value)
               const el = e.target
@@ -239,7 +288,7 @@ function ChatView({ currentModel, resetKey }: { currentModel: string; resetKey: 
               }
             }}
           />
-          <button className="send-btn" id="send-btn" aria-label="Send message" onClick={send}>
+          <button className="send-btn" id="send-btn" aria-label="Send message" onClick={send} disabled={pending}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>
           </button>
         </div>
