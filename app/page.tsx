@@ -666,6 +666,46 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
 interface GraphNode { id: string; name: string; type: string; size: number }
 interface GraphEdge { source: string; target: string; weight: number }
 
+function RebuildGraphButton() {
+  const [state, setState] = useState<'idle' | 'queuing' | 'queued' | 'error'>('idle')
+  const [msg, setMsg] = useState('')
+
+  const rebuild = async () => {
+    if (state === 'queuing') return
+    setState('queuing')
+    setMsg('')
+    try {
+      const res = await fetch('/api/graph/rebuild', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || `failed (${res.status})`)
+      setState('queued')
+      setMsg('Rebuilding… this runs in the background and takes a minute or two. Refresh the graph shortly.')
+      setTimeout(() => setState('idle'), 8000)
+    } catch (e) {
+      setState('error')
+      setMsg((e as Error).message)
+    }
+  }
+
+  return (
+    <div style={{ textAlign: 'right', minWidth: 140 }}>
+      <button
+        className="save-btn"
+        onClick={rebuild}
+        disabled={state === 'queuing'}
+        style={{ whiteSpace: 'nowrap' }}
+      >
+        {state === 'queuing' ? 'Starting…' : 'Rebuild graph'}
+      </button>
+      {msg && (
+        <div style={{ fontSize: 11, marginTop: 6, maxWidth: 220, color: state === 'error' ? '#e53935' : 'var(--muted, #888)' }}>
+          {msg}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MemoryGraph() {
   const containerRef = useRef<HTMLDivElement>(null)
   const [dims, setDims] = useState({ width: 500, height: 400 })
@@ -1180,7 +1220,10 @@ function AppShell() {
 
         {/* MEMORY */}
         <div className={`view${view === 'memory' ? ' active' : ''}`} id="view-memory">
-          <div className="view-header"><span>{memoryTitle}</span><div className="sub">How the pieces your Entwin knows connect to each other</div></div>
+          <div className="view-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+            <span>{memoryTitle}<div className="sub">How the pieces your Entwin knows connect to each other</div></span>
+            <RebuildGraphButton />
+          </div>
           {view === 'memory' && <MemoryGraph />}
         </div>
 
