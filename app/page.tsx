@@ -645,6 +645,10 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
   })
   const [menuOpen, setMenuOpen] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [configured, setConfigured] = useState<{ provider?: string; model?: string } | null>(null)
+  const [saveErr, setSaveErr] = useState('')
+  const [saving, setSaving] = useState(false)
   const boxRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -653,6 +657,19 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
     }
     document.addEventListener('click', onDoc)
     return () => document.removeEventListener('click', onDoc)
+  }, [])
+
+  // Load whether an LLM key is already configured (never the key itself).
+  useEffect(() => {
+    fetch('/api/settings/llm')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.configured) {
+          setConfigured({ provider: d.provider, model: d.model })
+          if (d.provider) setProvider(d.provider as ProviderKey)
+        }
+      })
+      .catch(() => {})
   }, [])
 
   const isSelfHosted = !!SELF_HOSTED[provider]
@@ -664,6 +681,37 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
     { value: 'neocloud', name: 'Neocloud', desc: 'Self-hosted LLM, rented GPU compute.' },
     { value: 'onprem', name: 'On-prem LLM', desc: 'Self-hosted LLM, runs on your own hardware.' },
   ]
+
+  async function handleSave() {
+    setSaveErr('')
+    // Self-hosted providers aren't wired to the ingestion backend yet.
+    if (isSelfHosted) {
+      setSaveErr('Self-hosted providers are not yet supported for ingestion. Choose Claude, Gemini, or OpenAI.')
+      return
+    }
+    if (!apiKey || apiKey.length < 8) {
+      setSaveErr('Enter a valid API key.')
+      return
+    }
+    setSaving(true)
+    try {
+      const res = await fetch('/api/settings/llm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, model: selectedModel[provider], apiKey }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`)
+      setSaved(true)
+      setConfigured({ provider, model: selectedModel[provider] })
+      setApiKey('') // clear from memory after save; key is write-only
+      setTimeout(() => setSaved(false), 1800)
+    } catch (e) {
+      setSaveErr((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <>
@@ -678,7 +726,13 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
 
         <div className="settings-section">
           <div className="settings-label">LLM backend</div>
-          <div className="settings-help">Choose which model answers queries against the vault. This can be changed later without touching the rest of the app.</div>
+          <div className="settings-help">Choose which model powers email parsing and answers queries against the vault. Your API key is stored encrypted and used for all LLM work — parsing, embeddings, and chat.</div>
+
+          {configured?.provider && (
+            <div className="settings-help" style={{ marginTop: 8, color: 'var(--accent, #4caf50)' }}>
+              Currently configured: {configured.provider} · {configured.model}. Enter a new key below to change it.
+            </div>
+          )}
 
           {backends.map((b) => (
             <label className="backend-option" key={b.value}>
@@ -713,7 +767,15 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
           {!isSelfHosted && (
             <div id="api-key-field">
               <label className="field-label" htmlFor="api-key">API key</label>
-              <input type="password" className="text-input" id="api-key" placeholder="sk-ant-..." />
+              <input
+                type="password"
+                className="text-input"
+                id="api-key"
+                placeholder={configured?.provider === provider ? '•••••••• (set — enter to replace)' : 'sk-ant-... / sk-... / AIza...'}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                autoComplete="off"
+              />
             </div>
           )}
           {isSelfHosted && (
@@ -724,8 +786,9 @@ function SettingsView({ entwinName, setEntwinName }: { entwinName: string; setEn
           )}
 
           <div>
-            <button className="save-btn" onClick={() => { setSaved(true); setTimeout(() => setSaved(false), 1800) }}>Save settings</button>
+            <button className="save-btn" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</button>
             <span className={`save-confirm${saved ? ' show' : ''}`}>Saved</span>
+            {saveErr && <span className="save-confirm show" style={{ color: '#e53935' }}>{saveErr}</span>}
           </div>
         </div>
       </div>

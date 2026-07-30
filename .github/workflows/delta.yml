@@ -38,7 +38,7 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_MODEL: claude-opus-4-8
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # LLM keys are per-user now, read from Redis by the worker.
+          # This secret decrypts them (shared with the app).
+          ENTWIN_KEY_SECRET: ${{ secrets.ENTWIN_KEY_SECRET }}
         run: npm start

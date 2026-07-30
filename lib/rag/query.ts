@@ -1,15 +1,12 @@
 import { supabaseAdmin } from './supabase'
+import { getLlmConfig } from './llm-keys'
+import { makeProvider } from './provider'
 
 /**
- * The RAG retrieval + answer path. Isolation: `userEmail` is always passed by
- * the caller from getServerSession — never from the request body — and is the
- * hard filter inside the match_note_chunks RPC.
+ * RAG retrieval + answer, provider-agnostic. The user's LLM key/provider is
+ * loaded from the encrypted Redis store; the same key does both the query
+ * embedding and the answer generation. `userEmail` is the hard isolation scope.
  */
-
-const OPENAI_EMBED_URL = 'https://api.openai.com/v1/embeddings'
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
-const EMBED_MODEL = 'text-embedding-3-small'
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-4-8'
 
 export interface AskSource {
   n: number
@@ -24,18 +21,11 @@ export interface AskResult {
   sources: AskSource[]
 }
 
-async function embed(text: string): Promise<number[]> {
-  const res = await fetch(OPENAI_EMBED_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ model: EMBED_MODEL, input: text }),
-  })
-  if (!res.ok) throw new Error(`embedding failed: ${res.status}`)
-  const json = await res.json()
-  return json.data[0].embedding
+export class NoLlmKeyError extends Error {
+  constructor() {
+    super('No LLM key configured. Set one in Settings.')
+    this.name = 'NoLlmKeyError'
+  }
 }
 
 export async function ask(
@@ -43,7 +33,11 @@ export async function ask(
   question: string,
   cardId: string | null = null,
 ): Promise<AskResult> {
-  const queryEmbedding = await embed(question)
+  const config = await getLlmConfig(userEmail)
+  if (!config) throw new NoLlmKeyError()
+  const provider = makeProvider(config)
+
+  const queryEmbedding = await provider.embed(question)
 
   const { data: matches, error } = await supabaseAdmin.rpc('match_note_chunks', {
     p_user_email: userEmail, // HARD user scope
@@ -58,34 +52,18 @@ export async function ask(
   }
 
   const context = matches
-    .map(
-      (m: any, i: number) =>
-        `[${i + 1}] (${m.note_date}, urgency=${m.urgency})\n${m.content}`,
-    )
+    .map((m: any, i: number) => `[${i + 1}] (${m.note_date}, urgency=${m.urgency})\n${m.content}`)
     .join('\n\n')
 
-  const res = await fetch(ANTHROPIC_URL, {
-    method: 'POST',
-    headers: {
-      'x-api-key': process.env.ANTHROPIC_API_KEY as string,
-      'anthropic-version': '2023-06-01',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 1024,
-      system:
-        'Answer the question using ONLY the provided email memory notes. Cite sources as [n]. If the notes do not contain the answer, say so plainly.',
-      messages: [
-        { role: 'user', content: `Question: ${question}\n\nMemory notes:\n${context}` },
-      ],
-    }),
+  const answer = await provider.chatText({
+    system:
+      'Answer the question using ONLY the provided email memory notes. Cite sources as [n]. If the notes do not contain the answer, say so plainly.',
+    user: `Question: ${question}\n\nMemory notes:\n${context}`,
+    maxTokens: 1024,
   })
-  if (!res.ok) throw new Error(`anthropic failed: ${res.status}`)
-  const json = await res.json()
 
   return {
-    answer: json.content[0].text,
+    answer,
     sources: matches.map((m: any, i: number) => ({
       n: i + 1,
       url: m.source_url,

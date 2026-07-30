@@ -1,5 +1,7 @@
 import { admin } from './lib/supabase.js';
 import { getGmailSession } from './lib/redis.js';
+import { getLlmConfig } from './lib/llm-keys.js';
+import { makeProvider } from './lib/provider.js';
 import {
   ensureAccessToken,
   listMessageIds,
@@ -32,7 +34,7 @@ async function tokenFor(acct) {
   return ensureAccessToken(acct.user_email, acct.card_id, session);
 }
 
-async function runBackfill(acct, accessToken) {
+async function runBackfill(acct, accessToken, provider) {
   const oneYearAgo = Math.floor(Date.now() / 1000) - 365 * 24 * 3600;
   for await (const { ids, nextPageToken } of listMessageIds(accessToken, {
     afterEpochSec: oneYearAgo,
@@ -40,7 +42,7 @@ async function runBackfill(acct, accessToken) {
   })) {
     for (const id of ids) {
       try {
-        await ingestMessage(accessToken, acct, id);
+        await ingestMessage(accessToken, acct, provider, id);
       } catch (err) {
         console.error(`[${acct.user_email}/${acct.card_id}] msg ${id}:`, err.message);
       }
@@ -57,7 +59,7 @@ async function runBackfill(acct, accessToken) {
     .eq('id', acct.id);
 }
 
-async function runDelta(acct, accessToken) {
+async function runDelta(acct, accessToken, provider) {
   if (!acct.last_history_id) {
     console.log(`[${acct.user_email}/${acct.card_id}] no history cursor — backfill first`);
     return;
@@ -65,7 +67,7 @@ async function runDelta(acct, accessToken) {
   const { ids, latestHistoryId } = await historySince(accessToken, acct.last_history_id);
   for (const id of ids) {
     try {
-      await ingestMessage(accessToken, acct, id);
+      await ingestMessage(accessToken, acct, provider, id);
     } catch (err) {
       console.error(`[${acct.user_email}/${acct.card_id}] msg ${id}:`, err.message);
     }
@@ -81,9 +83,15 @@ async function main() {
   console.log(`MODE=${MODE} accounts=${list.length}`);
   for (const acct of list) {
     try {
+      const llmConfig = await getLlmConfig(acct.user_email);
+      if (!llmConfig) {
+        console.log(`[${acct.user_email}/${acct.card_id}] no LLM key set — skipping`);
+        continue;
+      }
+      const provider = makeProvider(llmConfig);
       const accessToken = await tokenFor(acct);
-      if (MODE === 'backfill') await runBackfill(acct, accessToken);
-      else await runDelta(acct, accessToken);
+      if (MODE === 'backfill') await runBackfill(acct, accessToken, provider);
+      else await runDelta(acct, accessToken, provider);
       console.log(`[${acct.user_email}/${acct.card_id}] ${MODE} done`);
     } catch (err) {
       console.error(`[${acct.user_email}/${acct.card_id}] account failed:`, err.message);

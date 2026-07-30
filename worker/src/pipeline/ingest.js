@@ -2,12 +2,12 @@ import { admin } from '../lib/supabase.js';
 import { getMessage, extractParts } from '../lib/gmail.js';
 import { cleanBody, contentHash } from '../lib/clean.js';
 import { classify } from '../lib/classify.js';
-import { writeMemoryNote, extractEntities, updatesSummary } from '../lib/anthropic.js';
-import { embed, EMBED_MODEL } from '../lib/embed.js';
+import { writeMemoryNote, extractEntities, updatesSummary } from '../lib/prompts.js';
 
 // Process ONE Gmail message for an account. `acct` = { user_email, card_id }.
-// user_email is taken from the account row and threaded into every write.
-export async function ingestMessage(accessToken, acct, gmailMsgId) {
+// `provider` is the user's bound LLM provider (from makeProvider). user_email is
+// taken from the account row and threaded into every write.
+export async function ingestMessage(accessToken, acct, provider, gmailMsgId) {
   const { user_email, card_id } = acct;
 
   const { data: existing } = await admin
@@ -61,14 +61,14 @@ export async function ingestMessage(accessToken, acct, gmailMsgId) {
         reason: decision.reason,
       });
     } else if (decision.tier === 'storage') {
-      const { summary, urgent } = await updatesSummary(user_email, { subject, sender, body: clean });
+      const { summary, urgent } = await updatesSummary(provider, user_email, { subject, sender, body: clean });
       if (urgent) {
         decision = { tier: 'memory', reason: 'reclassified-urgent' };
         await admin
           .from('email_message')
           .update({ tier: 'memory', tier_reason: 'reclassified-urgent' })
           .eq('id', msgRow.id);
-        await runMemoryPipeline(acct, msgRow, { subject, sender, body: clean, internalDate, gmailMsgId });
+        await runMemoryPipeline(acct, provider, msgRow, { subject, sender, body: clean, internalDate, gmailMsgId });
       } else {
         await appendRollup(acct, internalDate, 'updates', {
           time: hhmm(internalDate),
@@ -79,7 +79,7 @@ export async function ingestMessage(accessToken, acct, gmailMsgId) {
         });
       }
     } else {
-      await runMemoryPipeline(acct, msgRow, { subject, sender, body: clean, internalDate, gmailMsgId });
+      await runMemoryPipeline(acct, provider, msgRow, { subject, sender, body: clean, internalDate, gmailMsgId });
     }
 
     await admin
@@ -93,16 +93,16 @@ export async function ingestMessage(accessToken, acct, gmailMsgId) {
   }
 }
 
-async function runMemoryPipeline(acct, msgRow, m) {
+async function runMemoryPipeline(acct, provider, msgRow, m) {
   const { user_email, card_id } = acct;
 
-  const note = await writeMemoryNote(user_email, {
+  const note = await writeMemoryNote(provider, user_email, {
     subject: m.subject,
     sender: m.sender,
     body: m.body,
     date: m.internalDate.toISOString().slice(0, 10),
   });
-  const related = await extractEntities(user_email, { subject: m.subject, sender: m.sender, body: m.body });
+  const related = await extractEntities(provider, user_email, { subject: m.subject, sender: m.sender, body: m.body });
 
   const noteDate = m.internalDate.toISOString().slice(0, 10);
   const noteId = await nextNoteId(user_email, noteDate, 'email');
@@ -133,7 +133,7 @@ async function runMemoryPipeline(acct, msgRow, m) {
   if (noteErr) throw new Error(`note insert: ${noteErr.message}`);
 
   const chunkText = `From: ${m.sender} | Date: ${noteDate} | Subject: ${m.subject}\n${note.raw_summary}\n${note.free_text || ''}`;
-  const vector = await embed(chunkText);
+  const vector = await provider.embed(chunkText);
   const { error: chunkErr } = await admin.from('note_chunk').insert({
     user_email,
     card_id,
@@ -141,7 +141,7 @@ async function runMemoryPipeline(acct, msgRow, m) {
     chunk_index: 0,
     content: chunkText,
     embedding: vector,
-    embed_model: EMBED_MODEL,
+    embed_model: `${provider.provider}:${provider.model}`,
   });
   if (chunkErr) throw new Error(`chunk insert: ${chunkErr.message}`);
 }

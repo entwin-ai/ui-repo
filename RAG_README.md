@@ -19,15 +19,33 @@ and the **Memory Note v4** anatomy. **Standard RAG only** — the entity-bubble 
 wiki layer is not built yet, but `related_entities` is captured so it can be
 added later with no re-parse.
 
-## Isolation model (per your choice)
+## LLM: bring-your-own-key, provider-agnostic
 
-Users are identified by **Google email via NextAuth** — they are not Supabase
-Auth users, so there is no `auth.uid()`. Isolation is enforced in the
-**service layer**: every Supabase query is scoped by the session email, which is
-always taken from `getServerSession` and **never** from request input. Defense in
-depth: RLS is enabled and FORCED on every table with no anon/authenticated
-policies, so those keys read nothing — only the server's service-role key works,
-and it always adds the email filter.
+Each user sets their own LLM provider + API key in the **Settings** page. The key
+is stored **encrypted (AES-256-GCM) in Upstash Redis**, keyed by user email, and
+is used for ALL LLM work for that user: email parsing (write note + extract
+entities), the tier-2 updates summary, embeddings, and the `/api/ask` answer.
+
+Supported providers (each does chat + embeddings): **Claude** (chat via
+Anthropic, embeddings via Voyage), **OpenAI**, **Gemini**. The provider layer
+(`worker/src/lib/provider.js` and `lib/rag/provider.ts`) is a single interface
+with per-vendor adapters, so adding a provider is one adapter, not a pipeline
+change. Embeddings from any provider are normalized to 1536 dims to fit the
+fixed `vector(1536)` column.
+
+The key is **write-only** from the browser's perspective: after saving, no
+endpoint ever returns it. The app and worker share one secret,
+`ENTWIN_KEY_SECRET`, used only to encrypt/decrypt these per-user keys — neither
+holds any provider API key of its own.
+
+## Isolation model
+
+Users are identified by **Google email via NextAuth** (not Supabase Auth), so
+isolation is enforced in the **service layer**: every Supabase query is scoped by
+the session email, always taken from `getServerSession`, never from request
+input. Defense in depth: RLS is enabled and FORCED on every table with no
+anon/authenticated policies. Per-user LLM keys are isolated the same way — the
+Redis key is derived from the user's email.
 
 ## What was added
 
@@ -57,7 +75,7 @@ Create a project; run `0001` → `0002` → `0003` in the SQL editor. Enable the
 ### 2. Vercel env (add to existing)
 ```
 SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-ANTHROPIC_API_KEY, ANTHROPIC_MODEL, OPENAI_API_KEY
+ENTWIN_KEY_SECRET              # openssl rand -base64 32 — SAME value in the worker
 GH_REPO, GH_DISPATCH_TOKEN     # fine-grained PAT, Actions: read/write
 ```
 (You already have GOOGLE_*, NEXTAUTH_*, UPSTASH_REDIS_REST_*.)
@@ -68,7 +86,7 @@ Push the repo (private). Create an Environment named `ingestion` and add secrets
 SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
 GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
-ANTHROPIC_API_KEY, OPENAI_API_KEY
+ENTWIN_KEY_SECRET             # MUST match the app's value
 ```
 The worker reads Gmail refresh tokens from the SAME Upstash Redis your app
 already uses (identical key scheme), so no token migration is needed.
@@ -90,9 +108,9 @@ via `/api/ask`.
 - **Reading many users' Gmail** triggers Google's restricted-scope verification
   and likely an annual third-party security assessment. Plan for it before real
   users.
-- **Embedding egress**: email text goes to OpenAI for embeddings. Swap
-  `worker/src/lib/embed.js` (and `lib/rag/query.ts`) for a local embedder if that
-  must stay in-house.
+- **Embedding egress**: email text goes to the user's chosen provider for
+  embeddings. If content must stay in-house, add a local-embedding adapter in the
+  provider layer.
 
 ## Wiki RAG (later)
 
