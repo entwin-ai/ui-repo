@@ -1,8 +1,6 @@
 import { admin } from './supabase.js';
 
-// Provider-agnostic prompt functions. Each takes a bound `provider` (from
-// makeProvider) plus the user email for cost logging. The prompts are identical
-// across vendors; only the transport differs (handled in provider.js).
+// Provider-agnostic prompt functions. Cost logged per LLM call.
 
 async function logCost(userEmail, provider, callKind, usage) {
   await admin.from('llm_cost_log').insert({
@@ -14,40 +12,30 @@ async function logCost(userEmail, provider, callKind, usage) {
   });
 }
 
-// LLM call 1: Write Memory Note (v4 §3).
-export async function writeMemoryNote(provider, userEmail, { subject, sender, body, date }) {
+// MERGED call: Write Memory Note + Extract entities in ONE request. Previously
+// two calls (v4 spec); merging halves per-email LLM latency and is functionally
+// equivalent — the same fields, plus related_entities, in one JSON response.
+export async function writeNoteAndEntities(provider, userEmail, { subject, sender, body, date }) {
   const system = `You read one email and return a Memory Note as strict JSON, no prose, no markdown.
 Schema:
 {
   "raw_summary": string,
   "urgency": "critical"|"high"|"medium"|"low",
   "life_domain": "personal"|"professional",
-  "action": string[],
+  "action": string[],                 // subset of ["respond","give","schedule","decision","await","none","blank"]; "none"/"blank" stand alone
   "free_text": string,
-  "confidentiality": "yes"|"no"|"blank"
-}
-action is a subset of ["respond","give","schedule","decision","await","none","blank"]; "none"/"blank" stand alone.`;
+  "confidentiality": "yes"|"no"|"blank",
+  "related_entities": string[]        // canonical names of people/orgs this email is about; exclude the mailbox owner
+}`;
   const { text, usage } = await provider.chatJSON({
     system,
     user: `Date: ${date}\nFrom: ${sender}\nSubject: ${subject}\n\n${body}`,
-    maxTokens: 1024,
+    maxTokens: 1200,
   });
-  await logCost(userEmail, provider, 'write_note', usage);
-  return JSON.parse(text);
-}
-
-// LLM call 2: Extract entities.
-export async function extractEntities(provider, userEmail, { subject, sender, body }) {
-  const system = `Extract the people and organisations this email is about.
-Return strict JSON, no prose: {"related_entities": string[]}.
-Use canonical human-readable names. Do not include the mailbox owner.`;
-  const { text, usage } = await provider.chatJSON({
-    system,
-    user: `From: ${sender}\nSubject: ${subject}\n\n${body}`,
-    maxTokens: 512,
-  });
-  await logCost(userEmail, provider, 'extract_entities', usage);
-  return JSON.parse(text).related_entities || [];
+  await logCost(userEmail, provider, 'write_note_and_entities', usage);
+  const parsed = JSON.parse(text);
+  const related = Array.isArray(parsed.related_entities) ? parsed.related_entities : [];
+  return { note: parsed, related };
 }
 
 // Tier-2 narrow call: one-line summary + failsafe urgency check.

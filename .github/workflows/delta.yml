@@ -46,4 +46,7 @@ jobs:
           CLAUDE_EMBED_MODEL: ${{ secrets.CLAUDE_EMBED_MODEL }}
           OPENAI_EMBED_MODEL: ${{ secrets.OPENAI_EMBED_MODEL }}
           GEMINI_EMBED_MODEL: ${{ secrets.GEMINI_EMBED_MODEL }}
+          # Perf tuning (optional). Concurrency = emails processed in parallel.
+          # Default 6 if unset. Lower it if you still hit rate limits.
+          INGEST_CONCURRENCY: ${{ vars.INGEST_CONCURRENCY }}
         run: npm start

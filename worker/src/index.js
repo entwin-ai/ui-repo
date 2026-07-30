@@ -10,8 +10,10 @@ import {
 } from './lib/gmail.js';
 import { ingestMessage } from './pipeline/ingest.js';
 import { backfillEntities } from './entity-backfill.js';
+import { runPool } from './lib/pool.js';
 
 const MODE = process.env.MODE || 'delta'; // backfill | delta | entity-backfill
+const CONCURRENCY = Math.max(1, parseInt(process.env.INGEST_CONCURRENCY || '6', 10));
 const ONLY_USER = process.env.ONLY_USER || null; // optional single-user run
 const ONLY_CARD = process.env.ONLY_CARD || null; // optional single-card run
 
@@ -64,13 +66,15 @@ async function runBackfill(acct, accessToken, provider) {
       labelId,
       pageToken,
     })) {
-      for (const id of ids) {
+      // Process the page's messages with bounded concurrency instead of one at
+      // a time. Each task handles its own errors so one failure doesn't abort.
+      await runPool(ids, CONCURRENCY, async (id) => {
         try {
           await ingestMessage(accessToken, acct, provider, id);
         } catch (err) {
           console.error(`[${acct.user_email}/${acct.card_id}] msg ${id}:`, err.message);
         }
-      }
+      });
       await admin
         .from('sync_state')
         .update({
@@ -94,13 +98,13 @@ async function runDelta(acct, accessToken, provider) {
     return;
   }
   const { ids, latestHistoryId } = await historySince(accessToken, acct.last_history_id);
-  for (const id of ids) {
+  await runPool(ids, CONCURRENCY, async (id) => {
     try {
       await ingestMessage(accessToken, acct, provider, id);
     } catch (err) {
       console.error(`[${acct.user_email}/${acct.card_id}] msg ${id}:`, err.message);
     }
-  }
+  });
   await admin
     .from('sync_state')
     .update({ last_history_id: latestHistoryId, updated_at: new Date().toISOString() })

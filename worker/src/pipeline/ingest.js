@@ -2,7 +2,7 @@ import { admin } from '../lib/supabase.js';
 import { getMessage, extractParts } from '../lib/gmail.js';
 import { cleanBody, contentHash } from '../lib/clean.js';
 import { classify } from '../lib/classify.js';
-import { writeMemoryNote, extractEntities, updatesSummary } from '../lib/prompts.js';
+import { writeNoteAndEntities, updatesSummary } from '../lib/prompts.js';
 import { chunkText } from '../lib/chunk.js';
 import { resolveEntitiesForNote } from '../lib/resolver.js';
 
@@ -97,16 +97,16 @@ export async function ingestMessage(accessToken, acct, provider, gmailMsgId) {
 
 async function runMemoryPipeline(acct, provider, msgRow, m) {
   const { user_email, card_id } = acct;
+  const noteDate = m.internalDate.toISOString().slice(0, 10);
 
-  const note = await writeMemoryNote(provider, user_email, {
+  // MERGED single LLM call: note fields + related_entities together.
+  const { note, related } = await writeNoteAndEntities(provider, user_email, {
     subject: m.subject,
     sender: m.sender,
     body: m.body,
-    date: m.internalDate.toISOString().slice(0, 10),
+    date: noteDate,
   });
-  const related = await extractEntities(provider, user_email, { subject: m.subject, sender: m.sender, body: m.body });
 
-  const noteDate = m.internalDate.toISOString().slice(0, 10);
   const noteId = await nextNoteId(user_email, noteDate, 'email');
   const sourceUrl = `https://mail.google.com/mail/u/0/#all/${m.gmailMsgId}`;
 
@@ -134,42 +134,39 @@ async function runMemoryPipeline(acct, provider, msgRow, m) {
     .single();
   if (noteErr) throw new Error(`note insert: ${noteErr.message}`);
 
-  // Resolver (v4): turn the raw related_entities into canonical entities and
-  // record mentions — this builds the graph/wiki layer from data we already
-  // have. Non-fatal: a resolver hiccup shouldn't block the note's embedding.
+  // Resolver: build the entity/graph layer. Non-fatal.
   try {
     await resolveEntitiesForNote(user_email, noteRow.id, related, noteDate);
   } catch (err) {
     console.error(`[${user_email}] resolver:`, err.message);
   }
 
-  // Full-body RAG: embed the actual cleaned email body, chunked, so specific
-  // facts are retrievable — not just the LLM summary. The first chunk carries a
-  // context header (sender/date/subject + summary) so a match on chunk 0 still
-  // has the framing; later chunks are raw body continuation.
+  // Full-body RAG with BATCHED embeddings: build all chunk texts, embed them in
+  // ONE request, then bulk-insert. Chunk 0 carries a context header.
   const header = `From: ${m.sender} | Date: ${noteDate} | Subject: ${m.subject}\nSummary: ${note.raw_summary}`;
   const bodyChunks = chunkText(m.body);
-  // If the body was empty for some reason, fall back to the summary alone so the
-  // note is still retrievable.
   const pieces = bodyChunks.length > 0 ? bodyChunks : [note.raw_summary || m.subject];
+  const contents = pieces.map((p, i) => (i === 0 ? `${header}\n\n${p}` : p));
 
-  for (let i = 0; i < pieces.length; i++) {
-    const content = i === 0 ? `${header}\n\n${pieces[i]}` : pieces[i];
-    const vector = await provider.embed(content);
-    const { error: chunkErr } = await admin.from('note_chunk').insert({
-      user_email,
-      card_id,
-      note_id: noteRow.id,
-      chunk_index: i,
-      content,
-      embedding: vector,
-      embed_model: `${provider.provider}:${provider.model}`,
-    });
-    if (chunkErr) throw new Error(`chunk insert (${i}): ${chunkErr.message}`);
-  }
+  const vectors = await provider.embedBatch(contents); // one API call for all chunks
+
+  const rows = contents.map((content, i) => ({
+    user_email,
+    card_id,
+    note_id: noteRow.id,
+    chunk_index: i,
+    content,
+    embedding: vectors[i],
+    embed_model: `${provider.provider}:${provider.model}`,
+  }));
+  const { error: chunkErr } = await admin.from('note_chunk').insert(rows);
+  if (chunkErr) throw new Error(`chunk insert: ${chunkErr.message}`);
 }
 
 async function nextNoteId(userEmail, noteDate, source) {
+  // Under concurrency a count-based sequence races (two parallel notes read the
+  // same count -> same id -> unique-constraint reject). Keep the date-source
+  // shape but append a short random suffix for collision-resistance.
   const { count } = await admin
     .from('memory_note')
     .select('id', { count: 'exact', head: true })
@@ -177,7 +174,8 @@ async function nextNoteId(userEmail, noteDate, source) {
     .eq('note_date', noteDate)
     .eq('source', source);
   const seq = String((count || 0) + 1).padStart(3, '0');
-  return `${noteDate.replace(/-/g, '')}-${source}-${seq}`;
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `${noteDate.replace(/-/g, '')}-${source}-${seq}-${rand}`;
 }
 
 async function appendRollup(acct, date, kind, entry) {

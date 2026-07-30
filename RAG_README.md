@@ -197,3 +197,30 @@ report the same 1-year window.
 LLM call, all providers) into total input/output tokens plus a per-call-kind
 breakdown. Dashboard → Overview shows live "Input Tokens" / "Output Tokens"
 cards that refresh every 15s while a backfill runs.
+
+## Performance: concurrency, backoff, merged call, batched embeddings
+
+Four changes cut backfill wall-clock time dramatically (the job was
+API-latency-bound, processing one email at a time):
+
+1. **Bounded concurrency** (`worker/src/lib/pool.js`) — the backfill/delta now
+   process ~6 emails in parallel (tune with the `INGEST_CONCURRENCY` repo
+   variable; default 6). Since the runner was idle waiting on API responses,
+   this alone is a large speedup.
+2. **Retry with backoff** (`worker/src/lib/retry.js`) — every LLM/embed call
+   retries on 429/5xx with exponential backoff, honoring Retry-After. A rate
+   limit now waits-and-retries instead of dead-lettering the email. This both
+   fixes the 429 failures and makes concurrency safe near the provider ceiling.
+3. **Merged LLM call** — write-note and extract-entities are now ONE request
+   (`writeNoteAndEntities`) returning both the note fields and related_entities,
+   halving per-email LLM latency. Cost log kind is `write_note_and_entities`.
+4. **Batched embeddings** — all of an email's body chunks are embedded in ONE
+   `embedBatch` request (arrays: OpenAI/Voyage input arrays,
+   Gemini batchEmbedContents), then bulk-inserted, instead of one call per chunk.
+
+Concurrency safety: note_id now carries a random suffix so parallel notes on the
+same date can't collide on the unique constraint.
+
+Tuning: if you still see 429s, lower `INGEST_CONCURRENCY` (repo → Settings →
+Secrets and variables → Actions → Variables). If your provider has generous
+limits (OpenAI), you can raise it (8–10) for more speed.

@@ -1,14 +1,18 @@
 // LLM-agnostic provider layer. One interface, three adapters. The pipeline
-// calls chatJSON()/embed() and never touches a vendor SDK directly.
+// calls chatJSON()/embedBatch() and never touches a vendor SDK directly.
 //
-// Each provider must support BOTH chat and embeddings (per product decision).
-// All embeddings are normalized to 1536 dims (pad with zeros / truncate) so they
-// fit the fixed vector(1536) column regardless of the provider's native size.
+// Each provider must support BOTH chat and embeddings. All embeddings are
+// normalized to 1536 dims (pad/truncate) to fit the vector(1536) column.
+//
+// Every network call goes through apiFetch, which turns 429/5xx into a
+// RetryableError carrying Retry-After, and the bound methods are wrapped in
+// withRetry — so rate limits back off and retry instead of failing. This is
+// what makes the concurrency pool safe.
+
+import { withRetry, RetryableError } from './retry.js';
 
 const TARGET_DIM = 1536;
 
-// Model maps: the settings UI shows friendly labels; map the CHAT label to an
-// API model id, and pick a sensible embedding model per provider.
 const CHAT_MODEL_ID = {
   claude: {
     'Claude Opus 4.8 (latest)': 'claude-opus-4-8',
@@ -27,9 +31,6 @@ const CHAT_MODEL_ID = {
   },
 };
 
-// Embedding model per provider — CONFIG-DRIVEN (Option A). Override any of these
-// via env vars without a code change; the fallbacks are current sensible
-// defaults. This is the one place model names live for embeddings.
 const EMBED_MODEL_ID = {
   claude: process.env.CLAUDE_EMBED_MODEL || 'voyage-3',
   openai: process.env.OPENAI_EMBED_MODEL || 'text-embedding-3-small',
@@ -50,81 +51,72 @@ function stripJson(text) {
   return text.replace(/```json|```/g, '').trim();
 }
 
-// ---- CLAUDE (Anthropic messages API; embeddings via Voyage) -----------------
+// Shared fetch: on 429/5xx throw RetryableError (with Retry-After if present);
+// other non-2xx throw a plain Error (fail fast). Returns parsed JSON on success.
+async function apiFetch(label, url, init) {
+  const res = await fetch(url, init);
+  if (res.ok) return res.json();
+  const body = await res.text().catch(() => '');
+  if (res.status === 429 || (res.status >= 500 && res.status <= 504)) {
+    const ra = res.headers.get('retry-after');
+    let retryAfterMs;
+    if (ra) {
+      const secs = Number(ra);
+      retryAfterMs = Number.isFinite(secs) ? secs * 1000 : undefined;
+    }
+    throw new RetryableError(`${label} ${res.status}: ${body.slice(0, 200)}`, res.status, retryAfterMs);
+  }
+  throw new Error(`${label} ${res.status}: ${body.slice(0, 200)}`);
+}
+
+// ---- CLAUDE (Anthropic; embeddings via Voyage) ------------------------------
 const claude = {
   async chatJSON({ apiKey, model, system, user, maxTokens }) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    const json = await apiFetch('anthropic', 'https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        system,
-        messages: [{ role: 'user', content: user }],
-      }),
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] }),
     });
-    if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text().catch(() => '')}`);
-    const json = await res.json();
     return {
       text: stripJson(json.content[0].text),
-      usage: {
-        input_tokens: json.usage?.input_tokens,
-        output_tokens: json.usage?.output_tokens,
-      },
+      usage: { input_tokens: json.usage?.input_tokens, output_tokens: json.usage?.output_tokens },
     };
   },
-  async embed({ apiKey, text }) {
-    // Voyage AI — the embedding provider Anthropic points BYOK users to.
-    const res = await fetch('https://api.voyageai.com/v1/embeddings', {
+  async embedBatch({ apiKey, texts }) {
+    const json = await apiFetch('voyage', 'https://api.voyageai.com/v1/embeddings', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: EMBED_MODEL_ID.claude, input: text }),
+      body: JSON.stringify({ model: EMBED_MODEL_ID.claude, input: texts }),
     });
-    if (!res.ok) throw new Error(`voyage ${res.status}: ${await res.text().catch(() => '')}`);
-    const json = await res.json();
-    return normalizeDim(json.data[0].embedding);
+    return json.data.map((d) => normalizeDim(d.embedding));
   },
 };
 
 // ---- OPENAI -----------------------------------------------------------------
 const openai = {
   async chatJSON({ apiKey, model, system, user, maxTokens }) {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    const json = await apiFetch('openai', 'https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model,
         max_tokens: maxTokens,
         response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
       }),
     });
-    if (!res.ok) throw new Error(`openai ${res.status}: ${await res.text().catch(() => '')}`);
-    const json = await res.json();
     return {
       text: stripJson(json.choices[0].message.content),
-      usage: {
-        input_tokens: json.usage?.prompt_tokens,
-        output_tokens: json.usage?.completion_tokens,
-      },
+      usage: { input_tokens: json.usage?.prompt_tokens, output_tokens: json.usage?.completion_tokens },
     };
   },
-  async embed({ apiKey, text }) {
-    const res = await fetch('https://api.openai.com/v1/embeddings', {
+  async embedBatch({ apiKey, texts }) {
+    const json = await apiFetch('openai-embed', 'https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: EMBED_MODEL_ID.openai, input: text }),
+      body: JSON.stringify({ model: EMBED_MODEL_ID.openai, input: texts }),
     });
-    if (!res.ok) throw new Error(`openai-embed ${res.status}: ${await res.text().catch(() => '')}`);
-    const json = await res.json();
-    return normalizeDim(json.data[0].embedding);
+    return json.data.sort((a, b) => a.index - b.index).map((d) => normalizeDim(d.embedding));
   },
 };
 
@@ -132,7 +124,7 @@ const openai = {
 const gemini = {
   async chatJSON({ apiKey, model, system, user, maxTokens }) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const res = await fetch(url, {
+    const json = await apiFetch('gemini', url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -141,35 +133,29 @@ const gemini = {
         generationConfig: { maxOutputTokens: maxTokens, responseMimeType: 'application/json' },
       }),
     });
-    if (!res.ok) throw new Error(`gemini ${res.status}: ${await res.text().catch(() => '')}`);
-    const json = await res.json();
     const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
     return {
       text: stripJson(text),
-      usage: {
-        input_tokens: json.usageMetadata?.promptTokenCount,
-        output_tokens: json.usageMetadata?.candidatesTokenCount,
-      },
+      usage: { input_tokens: json.usageMetadata?.promptTokenCount, output_tokens: json.usageMetadata?.candidatesTokenCount },
     };
   },
-  async embed({ apiKey, text }) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL_ID.gemini}:embedContent?key=${apiKey}`;
-    const res = await fetch(url, {
+  async embedBatch({ apiKey, texts }) {
+    const model = EMBED_MODEL_ID.gemini;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents?key=${apiKey}`;
+    const json = await apiFetch('gemini-embed', url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        content: { parts: [{ text }] },
+        requests: texts.map((t) => ({ model: `models/${model}`, content: { parts: [{ text: t }] } })),
       }),
     });
-    if (!res.ok) throw new Error(`gemini-embed ${res.status}: ${await res.text().catch(() => '')}`);
-    const json = await res.json();
-    return normalizeDim(json.embedding.values);
+    return (json.embeddings || []).map((e) => normalizeDim(e.values));
   },
 };
 
 const ADAPTERS = { claude, openai, gemini };
 
-// Public factory: given a user's config, return bound chat/embed callables.
+// Public factory: returns bound, retry-wrapped chat + batch-embed callables.
 export function makeProvider(config) {
   const { provider, model, apiKey } = config;
   const adapter = ADAPTERS[provider];
@@ -178,8 +164,16 @@ export function makeProvider(config) {
   return {
     provider,
     model: chatModel,
-    chatJSON: (args) => adapter.chatJSON({ apiKey, model: chatModel, ...args }),
-    embed: (text) => adapter.embed({ apiKey, text }),
+    chatJSON: (args) =>
+      withRetry(() => adapter.chatJSON({ apiKey, model: chatModel, ...args }), { label: `${provider}.chat` }),
+    embedBatch: (texts) =>
+      withRetry(() => adapter.embedBatch({ apiKey, texts }), { label: `${provider}.embed` }),
+    embed: async (text) => {
+      const [v] = await withRetry(() => adapter.embedBatch({ apiKey, texts: [text] }), {
+        label: `${provider}.embed`,
+      });
+      return v;
+    },
   };
 }
 
