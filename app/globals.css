@@ -1020,8 +1020,8 @@
     position: relative;
     overflow: hidden;
   }
-  #memory-graph-container svg { display: block; }
-  .memory-node-label { font-size: 11px; fill: var(--text-secondary); }
+  #memory-graph-container svg { display: block; user-select: none; }
+  .memory-node-label { font-size: 11px; fill: var(--text-secondary); pointer-events: none; }
   .memory-edge { stroke: var(--border); stroke-width: 1; }
   .memory-empty-note {
     position: absolute;
@@ -1029,6 +1029,92 @@
     left: 24px;
     font-size: 12px;
     color: var(--text-muted);
+  }
+
+  /* ---- zoom / pan controls ---- */
+  .memory-controls {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    z-index: 3;
+  }
+  .memory-controls button {
+    width: 30px;
+    height: 30px;
+    border: 1px solid var(--border);
+    background: var(--bg-card, #fff);
+    border-radius: 7px;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--text-secondary);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .memory-controls button:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+  /* ---- entity detail panel ---- */
+  .memory-panel {
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    width: 340px;
+    overflow: auto;
+    background: var(--bg-card, #fff);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 16px 18px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.14);
+    z-index: 4;
+  }
+  .memory-panel-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .memory-panel-head strong { font-size: 15px; color: var(--text-primary); }
+  .memory-panel-close {
+    border: none; background: none; cursor: pointer; font-size: 20px;
+    line-height: 1; color: var(--text-muted); padding: 0 2px;
+  }
+  .memory-panel-close:hover { color: var(--text-primary); }
+  .memory-panel-meta {
+    font-size: 12px; color: var(--text-muted); margin: 4px 0 12px;
+    text-transform: capitalize;
+  }
+  .memory-panel-loading { font-size: 13px; color: var(--text-muted); }
+  .memory-panel-body { font-size: 13.5px; line-height: 1.6; color: var(--text-primary); }
+  .memory-answer-p { margin: 0 0 11px; }
+  .memory-answer-list { margin: 0 0 11px; padding-left: 18px; }
+  .memory-answer-list li { margin-bottom: 5px; }
+
+  /* inline citation links */
+  .memory-cite {
+    color: var(--blue);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.82em;
+    vertical-align: super;
+    padding: 0 1px;
+  }
+  .memory-cite:hover { text-decoration: underline; }
+  .memory-cite-plain { color: var(--text-muted); font-weight: 600; }
+
+  /* references block */
+  .memory-refs { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .memory-refs-title {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px;
+  }
+  .memory-refs-list { margin: 0; padding-left: 20px; font-size: 12.5px; }
+  .memory-refs-list li { margin-bottom: 6px; line-height: 1.4; }
+  .memory-refs-list a { color: var(--blue); text-decoration: none; }
+  .memory-refs-list a:hover { text-decoration: underline; }
+  .memory-ref-tag {
+    display: inline-block; margin-left: 6px; padding: 1px 6px;
+    font-size: 10px; border-radius: 999px; background: var(--bg-hover);
+    color: var(--text-secondary); text-transform: capitalize;
   }
 
   /* ---- v1-style live stat card ---- */

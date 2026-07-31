@@ -663,8 +663,10 @@ function DashboardView({ connectedCount, total, entities, setEntities }: { conne
 
 /* ---------------- Memory view ---------------- */
 
-interface GraphNode { id: string; name: string; type: string; size: number }
+interface GraphNode { id: string; name: string; type: string; size: number; firstSeen?: string; lastSeen?: string }
 interface GraphEdge { source: string; target: string; weight: number }
+interface WikiSource { n: number; url: string | null; date: string | null; urgency: string | null; similarity: number }
+interface WikiState { answer: string; sources: WikiSource[]; loading: boolean }
 
 function RebuildGraphButton() {
   const [state, setState] = useState<'idle' | 'queuing' | 'queued' | 'error'>('idle')
@@ -706,6 +708,85 @@ function RebuildGraphButton() {
   )
 }
 
+function refLabel(s: WikiSource): string {
+  const parts: string[] = []
+  if (s.date) {
+    const d = new Date(s.date)
+    parts.push(isNaN(d.getTime()) ? String(s.date) : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }))
+  }
+  if (s.url) {
+    try { parts.push(new URL(s.url).hostname.replace(/^www\./, '')) } catch { /* ignore */ }
+  }
+  if (parts.length === 0) parts.push('Memory note')
+  return parts.join(' · ')
+}
+
+// Strip light markdown to plain, readable text (headings, bold, italics,
+// bullets, code fences, links) while keeping [n] citation markers intact.
+function stripMarkup(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, '').trim()) // code fences
+    .replace(/`([^`]+)`/g, '$1')                                     // inline code
+    .replace(/^#{1,6}\s+/gm, '')                                     // headings
+    .replace(/\*\*([^*]+)\*\*/g, '$1')                               // bold
+    .replace(/(^|[^*])\*([^*]+)\*/g, '$1$2')                         // italics
+    .replace(/^\s*[-*+]\s+/gm, '• ')                                 // bullets
+    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '$1 ($2)')           // md links
+    .replace(/[ \t]+\n/g, '\n')
+    .trim()
+}
+
+// Renders answer as readable paragraphs; converts inline [n] into links that
+// open the matching reference in a new tab (or jump to it if it has no URL).
+function WikiAnswer({ answer, sources }: { answer: string; sources: WikiSource[] }) {
+  const clean = stripMarkup(answer)
+  const byN = Object.fromEntries(sources.map((s) => [s.n, s]))
+  const paragraphs = clean.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean)
+
+  const renderWithCitations = (line: string, keyBase: string) => {
+    const out: React.ReactNode[] = []
+    const re = /\[(\d+)\]/g
+    let last = 0
+    let m: RegExpExecArray | null
+    let i = 0
+    while ((m = re.exec(line)) !== null) {
+      if (m.index > last) out.push(line.slice(last, m.index))
+      const n = Number(m[1])
+      const src = byN[n]
+      if (src?.url) {
+        out.push(
+          <a key={`${keyBase}-c${i}`} className="memory-cite" href={src.url} target="_blank" rel="noopener noreferrer" title={refLabel(src)}>[{n}]</a>
+        )
+      } else {
+        out.push(<sup key={`${keyBase}-c${i}`} className="memory-cite memory-cite-plain">[{n}]</sup>)
+      }
+      last = m.index + m[0].length
+      i++
+    }
+    if (last < line.length) out.push(line.slice(last))
+    return out
+  }
+
+  if (!clean) return <span className="memory-panel-loading">Nothing recorded yet.</span>
+
+  return (
+    <>
+      {paragraphs.map((p, pi) => {
+        const lines = p.split(/\n/).filter(Boolean)
+        const isList = lines.every((l) => l.startsWith('• '))
+        if (isList) {
+          return (
+            <ul className="memory-answer-list" key={pi}>
+              {lines.map((l, li) => <li key={li}>{renderWithCitations(l.replace(/^•\s+/, ''), `${pi}-${li}`)}</li>)}
+            </ul>
+          )
+        }
+        return <p className="memory-answer-p" key={pi}>{renderWithCitations(p.replace(/\n/g, ' '), String(pi))}</p>
+      })}
+    </>
+  )
+}
+
 function MemoryGraph() {
   const containerRef = useRef<HTMLDivElement>(null)
   const [dims, setDims] = useState({ width: 500, height: 400 })
@@ -714,13 +795,23 @@ function MemoryGraph() {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   const [selected, setSelected] = useState<GraphNode | null>(null)
-  const [wiki, setWiki] = useState<{ answer: string; loading: boolean } | null>(null)
+  const [wiki, setWiki] = useState<WikiState | null>(null)
+
+  // Pan/zoom viewport state.
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 })
+  const panRef = useRef<{ startX: number; startY: number; ox: number; oy: number; moved: boolean } | null>(null)
+  const [panning, setPanning] = useState(false)
 
   useEffect(() => {
-    if (containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect()
+    if (!containerRef.current) return
+    const measure = () => {
+      const rect = containerRef.current!.getBoundingClientRect()
       setDims({ width: rect.width || 500, height: rect.height || 400 })
     }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(containerRef.current)
+    return () => ro.disconnect()
   }, [])
 
   useEffect(() => {
@@ -751,13 +842,75 @@ function MemoryGraph() {
   })
   const byId = Object.fromEntries(positioned.map((n) => [n.id, n]))
 
-  const maxSize = Math.max(1, ...nodes.map((n) => n.size))
-  const radiusFor = (size: number) => 6 + (size / maxSize) * 18
-  const nodeColor = (type: string) => (type === 'organisation' ? 'var(--bronze)' : 'var(--blue)')
+  // ---- Bubble size by weight (mention count), on a sqrt scale so area, not
+  // radius, tracks weight — big hubs don't swamp everything else.
+  const sizes = nodes.map((n) => n.size)
+  const minSize = Math.min(1, ...sizes)
+  const maxSize = Math.max(1, ...sizes)
+  const radiusFor = (size: number) => {
+    if (maxSize <= minSize) return 14
+    const t = (Math.sqrt(size) - Math.sqrt(minSize)) / (Math.sqrt(maxSize) - Math.sqrt(minSize))
+    return 8 + t * 26 // 8px … 34px
+  }
+
+  // ---- Bubble color by weight + importance. Hue anchored to entity type
+  // (people = blue family, organisations = bronze family); lightness ramps with
+  // weight so heavier / more important entities read as deeper, more saturated.
+  const importanceOf = (size: number) => {
+    if (maxSize <= minSize) return 0.5
+    return (size - minSize) / (maxSize - minSize) // 0 … 1
+  }
+  const nodeColor = (n: GraphNode) => {
+    const t = importanceOf(n.size)
+    // People: light sky blue → deep blue. Orgs: light sand → deep bronze.
+    const ramp = n.type === 'organisation'
+      ? ['#D9C7A8', '#B79A6A', '#8A6D45', '#5E4A2C']
+      : ['#A9D3F0', '#5FA9E0', '#1D83CE', '#12547F']
+    const idx = Math.min(ramp.length - 1, Math.floor(t * ramp.length))
+    return ramp[idx]
+  }
+  const strokeFor = (n: GraphNode) => (n.type === 'organisation' ? '#5E4A2C' : '#12547F')
+
+  // ---- Zoom / pan handlers ----
+  function clampK(k: number) { return Math.min(3.5, Math.max(0.3, k)) }
+  function zoomAt(factor: number, cx: number, cy: number) {
+    setView((v) => {
+      const k2 = clampK(v.k * factor)
+      const scale = k2 / v.k
+      // keep the point under (cx,cy) fixed while scaling
+      return { k: k2, x: cx - (cx - v.x) * scale, y: cy - (cy - v.y) * scale }
+    })
+  }
+  function onWheel(e: React.WheelEvent) {
+    e.preventDefault()
+    const rect = containerRef.current?.getBoundingClientRect()
+    const cx = e.clientX - (rect?.left ?? 0)
+    const cy = e.clientY - (rect?.top ?? 0)
+    zoomAt(e.deltaY < 0 ? 1.12 : 1 / 1.12, cx, cy)
+  }
+  function onPointerDown(e: React.PointerEvent) {
+    // left-button drag on empty canvas pans
+    if (e.button !== 0) return
+    ;(e.target as Element).setPointerCapture?.(e.pointerId)
+    panRef.current = { startX: e.clientX, startY: e.clientY, ox: view.x, oy: view.y, moved: false }
+    setPanning(true)
+  }
+  function onPointerMove(e: React.PointerEvent) {
+    const p = panRef.current
+    if (!p) return
+    const dx = e.clientX - p.startX
+    const dy = e.clientY - p.startY
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) p.moved = true
+    setView((v) => ({ ...v, x: p.ox + dx, y: p.oy + dy }))
+  }
+  function onPointerUp() { panRef.current = null; setPanning(false) }
+  function resetView() { setView({ x: 0, y: 0, k: 1 }) }
 
   async function openEntity(n: GraphNode) {
+    // ignore clicks that were actually a pan drag
+    if (panRef.current?.moved) return
     setSelected(n)
-    setWiki({ answer: '', loading: true })
+    setWiki({ answer: '', sources: [], loading: true })
     try {
       const res = await fetch('/api/wiki', {
         method: 'POST',
@@ -765,9 +918,13 @@ function MemoryGraph() {
         body: JSON.stringify({ entityId: n.id }),
       })
       const d = await res.json()
-      setWiki({ answer: d.error ? `Error: ${d.error}` : d.answer, loading: false })
+      setWiki({
+        answer: d.error ? `Error: ${d.error}` : (d.answer || ''),
+        sources: Array.isArray(d.sources) ? d.sources : [],
+        loading: false,
+      })
     } catch (e) {
-      setWiki({ answer: `Error: ${(e as Error).message}`, loading: false })
+      setWiki({ answer: `Error: ${(e as Error).message}`, sources: [], loading: false })
     }
   }
 
@@ -780,33 +937,98 @@ function MemoryGraph() {
       )}
 
       {nodes.length > 0 && (
-        <svg width={width} height={height}>
-          {edges.map((e, i) => {
-            const a = byId[e.source], b = byId[e.target]
-            if (!a || !b) return null
-            return <line key={i} className="memory-edge" x1={a.x} y1={a.y} x2={b.x} y2={b.y} strokeWidth={Math.min(1 + e.weight * 0.4, 4)} />
-          })}
-          {positioned.map((n) => (
-            <g key={n.id} transform={`translate(${n.x},${n.y})`} style={{ cursor: 'pointer' }} onClick={() => openEntity(n)}>
-              <circle r={radiusFor(n.size)} fill={nodeColor(n.type)} opacity={selected?.id === n.id ? 1 : 0.85} />
-              <text className="memory-node-label" textAnchor="middle" dy={-radiusFor(n.size) - 4}>{n.name}</text>
-            </g>
-          ))}
+        <svg
+          width={width}
+          height={height}
+          onWheel={onWheel}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerLeave={onPointerUp}
+          style={{ cursor: panning ? 'grabbing' : 'grab', touchAction: 'none' }}
+        >
+          <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+            {edges.map((e, i) => {
+              const a = byId[e.source], b = byId[e.target]
+              if (!a || !b) return null
+              const dim = selected && selected.id !== e.source && selected.id !== e.target
+              return (
+                <line
+                  key={i}
+                  className="memory-edge"
+                  x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                  strokeWidth={Math.min(1 + e.weight * 0.4, 4)}
+                  opacity={dim ? 0.15 : 0.55}
+                />
+              )
+            })}
+            {positioned.map((n) => {
+              const r = radiusFor(n.size)
+              const isSel = selected?.id === n.id
+              const dim = selected && !isSel
+              return (
+                <g key={n.id} transform={`translate(${n.x},${n.y})`} style={{ cursor: 'pointer' }} onClick={() => openEntity(n)}>
+                  <circle
+                    r={r}
+                    fill={nodeColor(n)}
+                    stroke={isSel ? strokeFor(n) : 'rgba(255,255,255,0.65)'}
+                    strokeWidth={isSel ? 3 : 1.25}
+                    opacity={dim ? 0.35 : 1}
+                  />
+                  <text
+                    className="memory-node-label"
+                    textAnchor="middle"
+                    dy={-r - 5}
+                    opacity={dim ? 0.4 : 1}
+                  >
+                    {n.name}
+                  </text>
+                </g>
+              )
+            })}
+          </g>
         </svg>
       )}
 
+      {nodes.length > 0 && (
+        <div className="memory-controls">
+          <button title="Zoom in" onClick={() => zoomAt(1.2, width / 2, height / 2)}>+</button>
+          <button title="Zoom out" onClick={() => zoomAt(1 / 1.2, width / 2, height / 2)}>−</button>
+          <button title="Reset view" onClick={resetView}>⟳</button>
+        </div>
+      )}
+
       {selected && (
-        <div style={{ position: 'absolute', right: 12, top: 12, width: 320, maxHeight: height - 24, overflow: 'auto', background: 'var(--card, #fff)', border: '1px solid var(--border, #e5e5e5)', borderRadius: 10, padding: 14, boxShadow: '0 4px 18px rgba(0,0,0,0.12)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <div className="memory-panel" style={{ maxHeight: height - 24 }}>
+          <div className="memory-panel-head">
             <strong>{selected.name}</strong>
-            <button onClick={() => { setSelected(null); setWiki(null) }} style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 18 }}>×</button>
+            <button className="memory-panel-close" onClick={() => { setSelected(null); setWiki(null) }} aria-label="Close">×</button>
           </div>
-          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+          <div className="memory-panel-meta">
             {selected.type} · mentioned in {selected.size} note{selected.size === 1 ? '' : 's'}
           </div>
-          <div style={{ fontSize: 14, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
-            {wiki?.loading ? 'Reading everything about them from your email…' : wiki?.answer}
+
+          <div className="memory-panel-body">
+            {wiki?.loading
+              ? <div className="memory-panel-loading">Reading everything about them from your email…</div>
+              : <WikiAnswer answer={wiki?.answer || ''} sources={wiki?.sources || []} />}
           </div>
+
+          {!wiki?.loading && (wiki?.sources?.length ?? 0) > 0 && (
+            <div className="memory-refs">
+              <div className="memory-refs-title">References</div>
+              <ol className="memory-refs-list">
+                {wiki!.sources.map((s) => (
+                  <li key={s.n} id={`ref-${selected.id}-${s.n}`}>
+                    {s.url
+                      ? <a href={s.url} target="_blank" rel="noopener noreferrer">{refLabel(s)}</a>
+                      : <span>{refLabel(s)}</span>}
+                    {s.urgency && s.urgency !== 'none' && <span className="memory-ref-tag">{s.urgency}</span>}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
         </div>
       )}
     </div>
