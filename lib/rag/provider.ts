@@ -112,12 +112,30 @@ async function geminiChat(apiKey: string, model: string, a: ChatArgs): Promise<s
 }
 
 async function claudeEmbed(apiKey: string, text: string): Promise<number[]> {
+  // Anthropic has no embeddings endpoint, so the Claude provider embeds via
+  // Voyage AI. Voyage uses its OWN keys (they start with "pa-") — a Claude key
+  // (sk-ant-…) will 401 here. Prefer a dedicated VOYAGE_API_KEY; only fall back
+  // to the provider key if it actually looks like a Voyage key.
+  const voyageKey =
+    process.env.VOYAGE_API_KEY ||
+    (apiKey.startsWith('pa-') ? apiKey : '')
+  if (!voyageKey) {
+    throw new Error(
+      'Claude embeddings require a Voyage AI key. Set VOYAGE_API_KEY in the server environment (get one at voyageai.com). Your Anthropic key is used for chat only.',
+    )
+  }
   const res = await fetch('https://api.voyageai.com/v1/embeddings', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${voyageKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: EMBED_MODEL_ID.claude, input: text }),
   })
-  if (!res.ok) throw new Error(`voyage ${res.status}`)
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    if (res.status === 401) {
+      throw new Error('voyage 401 — the Voyage API key was rejected. Check VOYAGE_API_KEY.')
+    }
+    throw new Error(`voyage ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`)
+  }
   const j = await res.json()
   return normalizeDim(j.data[0].embedding)
 }

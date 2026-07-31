@@ -83,9 +83,19 @@ const claude = {
     };
   },
   async embedBatch({ apiKey, texts }) {
+    // Voyage uses its own keys (prefix "pa-"); a Claude key (sk-ant-…) will 401.
+    // Prefer a dedicated VOYAGE_API_KEY from the worker env.
+    const voyageKey =
+      process.env.VOYAGE_API_KEY ||
+      (apiKey && apiKey.startsWith('pa-') ? apiKey : '');
+    if (!voyageKey) {
+      throw new Error(
+        'Claude embeddings require a Voyage AI key. Set VOYAGE_API_KEY in the worker environment (voyageai.com). The Anthropic key is used for chat only.',
+      );
+    }
     const json = await apiFetch('voyage', 'https://api.voyageai.com/v1/embeddings', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${voyageKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: EMBED_MODEL_ID.claude, input: texts }),
     });
     return json.data.map((d) => normalizeDim(d.embedding));
