@@ -1,0 +1,703 @@
+'use client'
+
+import { useEffect, useRef, useState, useCallback } from 'react'
+
+/**
+ * Animatics Phase 1 flow, mounted as a modal over the Connectors view and
+ * driven by the connector card's Connect button. Walks the user through:
+ *   1. upload a .txt novel (junk stripped server-side)
+ *   2. review extracted characters, upload a headshot per character
+ *   3. generate the vivid screenplay (.docx to review + edit)
+ *   4. approve → ready for Phase 2
+ *
+ * All heavy work is server-side; this component only orchestrates and shows
+ * state. It resumes an in-progress job on open via /api/animatics/status.
+ */
+
+interface CharacterView {
+  id: string
+  name: string
+  description: string
+  role: string
+  hasHeadshot: boolean
+}
+
+type Step = 'upload' | 'characters' | 'screenplay' | 'approved'
+
+interface RenderState {
+  progress: string | null
+  driveLink: string | null
+  emailed: boolean
+  failure: string | null
+}
+
+interface JobState {
+  id: string
+  status: string
+  characters: CharacterView[]
+  hasScreenplay: boolean
+  screenplayProse: string | null
+  shotCount: number
+  parseStats?: Record<string, number>
+  documentUrl: string | null
+  render?: RenderState | null
+  error?: string | null
+}
+
+function statusToStep(job: JobState | null): Step {
+  if (!job) return 'upload'
+  if (
+    job.status === 'RENDER_QUEUED' ||
+    job.status === 'RENDERING' ||
+    job.status === 'RENDER_DONE' ||
+    job.status === 'RENDER_FAILED'
+  )
+    return 'approved' // render UI lives within the approved step view
+  if (job.status === 'APPROVED') return 'approved'
+  if (job.status === 'AWAITING_APPROVAL' || job.hasScreenplay) return 'screenplay'
+  if (job.status === 'EXTRACTING') return 'characters'
+  return 'characters'
+}
+
+/**
+ * Read a fetch Response safely. If the server returned a non-JSON body (e.g. a
+ * platform "Request Entity Too Large" or a proxy error page), surface a clean
+ * message instead of a cryptic "Unexpected token" JSON parse error.
+ */
+async function readResponse(
+  r: Response,
+): Promise<{ ok: boolean; data: Record<string, unknown>; error?: string }> {
+  const text = await r.text()
+  let data: Record<string, unknown> = {}
+  try {
+    data = text ? JSON.parse(text) : {}
+  } catch {
+    // Non-JSON response — build a human message from status.
+    const snippet = text.slice(0, 120).replace(/\s+/g, ' ').trim()
+    const msg =
+      r.status === 413
+        ? 'That image is too large to upload. Please choose a smaller headshot.'
+        : `Server error (${r.status})${snippet ? `: ${snippet}` : ''}`
+    return { ok: false, data: {}, error: msg }
+  }
+  return { ok: r.ok, data, error: r.ok ? undefined : (data.error as string) }
+}
+
+/**
+ * Downscale/re-encode a headshot in the browser before upload so payloads stay
+ * small and well under the serverless body limit. Faces don't need to be huge —
+ * 640px on the long edge is plenty to drive animation. Returns a JPEG Blob.
+ */
+async function downscaleImage(file: File, maxEdge = 640, quality = 0.85): Promise<Blob> {
+  const bitmap = await createImageBitmap(file).catch(() => null)
+  if (!bitmap) return file // fallback: send original if decode fails
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+  const w = Math.round(bitmap.width * scale)
+  const h = Math.round(bitmap.height * scale)
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return file
+  ctx.drawImage(bitmap, 0, 0, w, h)
+  return await new Promise<Blob>((resolve) => {
+    canvas.toBlob(
+      (blob) => resolve(blob || file),
+      'image/jpeg',
+      quality,
+    )
+  })
+}
+
+export default function AnimaticsFlow({
+  onClose,
+  onConnectedChange,
+}: {
+  onClose: () => void
+  onConnectedChange?: (connected: boolean) => void
+}) {
+  const [job, setJob] = useState<JobState | null>(null)
+  const [step, setStep] = useState<Step>('upload')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [needsKey, setNeedsKey] = useState(false)
+  const [editedProse, setEditedProse] = useState<string>('')
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const [extracting, setExtracting] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const headshotRefs = useRef<Record<string, HTMLInputElement | null>>({})
+
+  // Resume any in-progress job on open.
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const r = await fetch('/api/animatics/status')
+        const d = await r.json()
+        if (d.job) {
+          onConnectedChange?.(true)
+          setJob(d.job)
+          setStep(statusToStep(d.job))
+          if (d.job.screenplayProse) setEditedProse(d.job.screenplayProse)
+          // Job was uploaded but extraction hadn't finished — resume it.
+          if (d.job.status === 'EXTRACTING' && (!d.job.characters || d.job.characters.length === 0)) {
+            setExtracting(true)
+            const cast = await extractCast(d.job.id)
+            if (cast) setJob({ ...d.job, characters: cast, status: 'AWAITING_HEADSHOTS' })
+            setExtracting(false)
+          }
+        }
+      } catch {
+        /* ignore — start fresh */
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const refreshStatus = useCallback(async (jobId: string) => {
+    const r = await fetch(`/api/animatics/status?jobId=${jobId}`)
+    const d = await r.json()
+    if (d.job) {
+      setJob(d.job)
+      if (d.job.screenplayProse) setEditedProse(d.job.screenplayProse)
+    }
+    return d.job as JobState | null
+  }, [])
+
+  // Step 1 — upload the .txt novel.
+  async function onFilePicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setError(null)
+    setNeedsKey(false)
+
+    if (!file.name.toLowerCase().endsWith('.txt')) {
+      setError('Only .txt files are accepted. Please choose a plain-text novel.')
+      if (fileRef.current) fileRef.current.value = ''
+      return
+    }
+
+    setBusy(true)
+    setExtracting(false)
+    try {
+      const form = new FormData()
+      form.append('story', file)
+      const r = await fetch('/api/animatics/parse', { method: 'POST', body: form })
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Upload failed.')
+        if (d.needsKey) setNeedsKey(true)
+        return
+      }
+      const jobId = d.jobId as string
+      // A run now exists — flip the connector button to "Disconnect".
+      onConnectedChange?.(true)
+      // Upload succeeded instantly. Now extract the cast as a separate step so
+      // the slow LLM call can't time out the upload.
+      setStep('characters')
+      setExtracting(true)
+      const cast = await extractCast(jobId)
+      setJob({
+        id: jobId,
+        status: cast ? 'AWAITING_HEADSHOTS' : 'EXTRACTING',
+        characters: cast || [],
+        hasScreenplay: false,
+        screenplayProse: null,
+        shotCount: 0,
+        parseStats: d.parseStats as Record<string, number>,
+        documentUrl: null,
+      })
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+      setExtracting(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
+
+  /**
+   * Call the character-extraction step, retrying a couple of times on transient
+   * failures. Returns the cast, or null if it couldn't be extracted.
+   */
+  async function extractCast(jobId: string): Promise<CharacterView[] | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await fetch('/api/animatics/characters', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId }),
+        })
+        const { ok, data: d, error: err } = await readResponse(r)
+        if (ok && Array.isArray(d.characters)) {
+          return d.characters as CharacterView[]
+        }
+        if (d.needsKey) {
+          setNeedsKey(true)
+          setError(err || 'No LLM key configured.')
+          return null
+        }
+        // Retryable server error — brief backoff then try again.
+        if (attempt < 2) {
+          await new Promise((res) => setTimeout(res, 1500))
+          continue
+        }
+        setError(err || 'Character extraction failed. You can retry.')
+        return null
+      } catch {
+        if (attempt < 2) {
+          await new Promise((res) => setTimeout(res, 1500))
+          continue
+        }
+        setError('Character extraction failed. You can retry.')
+        return null
+      }
+    }
+    return null
+  }
+
+  // Step 2 — upload a headshot for one character.
+  async function onHeadshotPicked(characterId: string, e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file || !job) return
+    setError(null)
+    setBusy(true)
+    try {
+      // Shrink in the browser so the request stays small and never hits the
+      // serverless body-size limit (the original cause of the JSON parse error).
+      const scaled = await downscaleImage(file)
+      const form = new FormData()
+      form.append('jobId', job.id)
+      form.append('characterId', characterId)
+      form.append('image', scaled, 'headshot.jpg')
+      const r = await fetch('/api/animatics/headshot', { method: 'POST', body: form })
+      const { ok, data, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Headshot upload failed.')
+        return
+      }
+      void data
+      await refreshStatus(job.id)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+      // reset the input so re-selecting the same file re-triggers change
+      if (headshotRefs.current[characterId]) headshotRefs.current[characterId]!.value = ''
+    }
+  }
+
+  const allHeadshots = !!job && job.characters.length > 0 && job.characters.every((c) => c.hasHeadshot)
+
+  // Step 3 — generate the screenplay. For long/multi-episode novels this runs
+  // segment-by-segment: we call the endpoint repeatedly until done:true, so the
+  // WHOLE novel is adapted and no single request times out.
+  async function generate() {
+    if (!job) return
+    setError(null)
+    setNeedsKey(false)
+    setBusy(true)
+    setProgress(null)
+    try {
+      // Safety cap on iterations (segments) to avoid an infinite loop.
+      for (let i = 0; i < 200; i++) {
+        const r = await fetch('/api/animatics/screenplay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId: job.id }),
+        })
+        const { ok, data: d, error: err } = await readResponse(r)
+        if (!ok) {
+          setError(err || 'Screenplay generation failed.')
+          if (d.needsKey) setNeedsKey(true)
+          return
+        }
+        if (d.done) {
+          setProgress(null)
+          const updated = await refreshStatus(job.id)
+          setStep('screenplay')
+          if (updated?.screenplayProse) setEditedProse(updated.screenplayProse)
+          return
+        }
+        // Not done — show progress and continue with the next segment.
+        const doneN = Number(d.doneSegments) || 0
+        const totalN = Number(d.totalSegments) || 0
+        setProgress({ done: doneN, total: totalN })
+      }
+      setError('Generation is taking unusually long. Please try again to resume.')
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Start over — forget the current run entirely and return to step 1. Works
+   * from ANY stage. Wipes the job server-side, then resets all local state.
+   */
+  async function startOver() {
+    setBusy(true)
+    setError(null)
+    try {
+      await fetch('/api/animatics/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(job ? { jobId: job.id } : {}),
+      }).catch(() => {})
+    } finally {
+      // Reset all local flow state to a clean slate.
+      setJob(null)
+      setStep('upload')
+      setEditedProse('')
+      setProgress(null)
+      setExtracting(false)
+      setNeedsKey(false)
+      setBusy(false)
+      onConnectedChange?.(false)
+    }
+  }
+
+  // Step 3b — save edits (rebuilds the .docx).
+  async function saveEdits() {
+    if (!job) return
+    setBusy(true)
+    setError(null)
+    try {
+      const r = await fetch('/api/animatics/document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id, prose: editedProse }),
+      })
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) setError(err || 'Could not save edits.')
+      else {
+        void d
+        await refreshStatus(job.id)
+      }
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Step 4 — approve.
+  async function approve() {
+    if (!job) return
+    setBusy(true)
+    setError(null)
+    try {
+      const r = await fetch('/api/animatics/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id, editedProse }),
+      })
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Approval failed.')
+        return
+      }
+      void d
+      await refreshStatus(job.id)
+      setStep('approved')
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Phase 2 — queue the approved screenplay for video rendering.
+  async function startRender() {
+    if (!job) return
+    setBusy(true)
+    setError(null)
+    try {
+      const r = await fetch('/api/animatics/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id }),
+      })
+      const { ok, data: d, error: err } = await readResponse(r)
+      if (!ok) {
+        setError(err || 'Could not queue rendering.')
+        return
+      }
+      void d
+      await refreshStatus(job.id)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // While a render is queued or in progress, poll status so the UI updates as
+  // the Colab worker reports progress and finally the Drive link.
+  useEffect(() => {
+    if (!job) return
+    if (job.status !== 'RENDER_QUEUED' && job.status !== 'RENDERING') return
+    const t = setInterval(() => {
+      refreshStatus(job.id)
+    }, 5000)
+    return () => clearInterval(t)
+  }, [job, refreshStatus])
+
+  return (
+    <div className="animatics-overlay" onClick={onClose}>
+      <div className="animatics-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="animatics-header">
+          <div className="animatics-title">Animatics — Create Anime from your Novel</div>
+          <div className="animatics-header-actions">
+            {(job || step !== 'upload') && (
+              <button
+                className="animatics-startover"
+                onClick={startOver}
+                disabled={busy}
+                title="Forget this run and start from the beginning"
+              >
+                ↻ Start over
+              </button>
+            )}
+            <button className="animatics-close" aria-label="Close" onClick={onClose}>
+              ×
+            </button>
+          </div>
+        </div>
+
+        {step === 'approved' && (
+          <div className="animatics-rerun-hint">
+            Want to make another? Use <strong>Start over</strong> above, or click
+            <strong> Disconnect</strong> on the card, to begin a fresh run.
+          </div>
+        )}
+
+        <div className="animatics-steps">
+          {(['upload', 'characters', 'screenplay', 'approved'] as Step[]).map((s, i) => (
+            <div
+              key={s}
+              className={`animatics-step-dot ${step === s ? 'active' : ''} ${
+                ['upload', 'characters', 'screenplay', 'approved'].indexOf(step) > i ? 'done' : ''
+              }`}
+            >
+              <span>{i + 1}</span>
+              {['Novel', 'Cast', 'Screenplay', 'Done'][i]}
+            </div>
+          ))}
+        </div>
+
+        <div className="animatics-body">
+          {error && (
+            <div className="animatics-error">
+              {error}
+              {needsKey && (
+                <>
+                  {' '}
+                  Add one under <strong>Settings → LLM</strong> and try again.
+                </>
+              )}
+            </div>
+          )}
+
+          {step === 'upload' && (
+            <div className="animatics-upload">
+              <p className="animatics-lead">
+                Upload your novel as a plain <code>.txt</code> file. Decorative characters
+                (border lines, separators, page markers) are stripped automatically — only the
+                real story is used.
+              </p>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".txt,text/plain"
+                style={{ display: 'none' }}
+                onChange={onFilePicked}
+              />
+              <button
+                className="animatics-primary"
+                disabled={busy}
+                onClick={() => fileRef.current?.click()}
+              >
+                {busy ? 'Reading…' : 'Browse for a .txt novel'}
+              </button>
+            </div>
+          )}
+
+          {step === 'characters' && extracting && (
+            <div className="animatics-extracting">
+              <div className="animatics-spinner" />
+              <p className="animatics-lead">
+                Reading your novel and identifying the characters… this can take a moment for a
+                long book.
+              </p>
+            </div>
+          )}
+
+          {step === 'characters' && !extracting && job && job.characters.length === 0 && (
+            <div className="animatics-characters">
+              <p className="animatics-lead">
+                We couldn&apos;t identify the cast on the last try. This is usually transient —
+                please retry.
+              </p>
+              <button
+                className="animatics-primary"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true)
+                  setError(null)
+                  setExtracting(true)
+                  const cast = await extractCast(job.id)
+                  if (cast) setJob({ ...job, characters: cast, status: 'AWAITING_HEADSHOTS' })
+                  setExtracting(false)
+                  setBusy(false)
+                }}
+              >
+                {busy ? 'Retrying…' : 'Retry character extraction'}
+              </button>
+            </div>
+          )}
+
+          {step === 'characters' && !extracting && job && job.characters.length > 0 && (
+            <div className="animatics-characters">
+              <p className="animatics-lead">
+                Found {job.characters.length} character
+                {job.characters.length === 1 ? '' : 's'}. Upload a headshot for each — these exact
+                faces drive the animation.
+              </p>
+              <div className="animatics-char-grid">
+                {job.characters.map((c) => (
+                  <div key={c.id} className={`animatics-char ${c.hasHeadshot ? 'ready' : ''}`}>
+                    <div className="animatics-char-name">
+                      {c.name} <span className="animatics-role">{c.role}</span>
+                    </div>
+                    <div className="animatics-char-desc">{c.description}</div>
+                    <input
+                      ref={(el) => {
+                        headshotRefs.current[c.id] = el
+                      }}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      style={{ display: 'none' }}
+                      onChange={(e) => onHeadshotPicked(c.id, e)}
+                    />
+                    <button
+                      className="animatics-secondary"
+                      disabled={busy}
+                      onClick={() => headshotRefs.current[c.id]?.click()}
+                    >
+                      {c.hasHeadshot ? '✓ Headshot set — replace' : 'Upload headshot'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <button className="animatics-primary" disabled={!allHeadshots || busy} onClick={generate}>
+                {busy
+                  ? progress && progress.total > 1
+                    ? `Generating… part ${progress.done}/${progress.total}`
+                    : 'Generating screenplay…'
+                  : 'Generate screenplay'}
+              </button>
+              {!allHeadshots && (
+                <div className="animatics-hint">Upload every headshot to continue.</div>
+              )}
+            </div>
+          )}
+
+          {step === 'screenplay' && job && (
+            <div className="animatics-screenplay">
+              <p className="animatics-lead">
+                Your screenplay is ready ({job.shotCount} shots). Download the Word file to read
+                it, or edit the text below. Approve when you&apos;re happy.
+              </p>
+              <div className="animatics-actions-row">
+                {job.documentUrl && (
+                  <a className="animatics-secondary" href={job.documentUrl}>
+                    Download .docx
+                  </a>
+                )}
+                <button className="animatics-secondary" disabled={busy} onClick={saveEdits}>
+                  {busy ? 'Saving…' : 'Save edits'}
+                </button>
+              </div>
+              <textarea
+                className="animatics-editor"
+                value={editedProse}
+                onChange={(e) => setEditedProse(e.target.value)}
+                spellCheck={false}
+              />
+              <button className="animatics-primary" disabled={busy} onClick={approve}>
+                {busy ? 'Approving…' : 'Approve screenplay'}
+              </button>
+            </div>
+          )}
+
+          {step === 'approved' && job && (
+            <div className="animatics-done">
+              {/* Not yet rendering — offer to start Phase 2. */}
+              {(job.status === 'APPROVED' || job.status === 'RENDER_FAILED') && (
+                <>
+                  <div className="animatics-check">✓</div>
+                  <p className="animatics-lead">
+                    Screenplay approved with {job.shotCount} shots. Generate the video next — it
+                    renders in the background and the download link is emailed to you when ready.
+                  </p>
+                  {job.status === 'RENDER_FAILED' && job.render?.failure && (
+                    <div className="animatics-error">
+                      Last render failed: {job.render.failure}
+                    </div>
+                  )}
+                  <button className="animatics-primary" disabled={busy} onClick={startRender}>
+                    {busy
+                      ? 'Queuing…'
+                      : job.status === 'RENDER_FAILED'
+                      ? 'Retry video generation'
+                      : 'Generate video'}
+                  </button>
+                </>
+              )}
+
+              {/* Queued / rendering — show live progress. */}
+              {(job.status === 'RENDER_QUEUED' || job.status === 'RENDERING') && (
+                <>
+                  <div className="animatics-spinner" />
+                  <p className="animatics-lead">
+                    {job.status === 'RENDER_QUEUED'
+                      ? 'Queued for rendering. Waiting for a render worker to pick it up…'
+                      : `Rendering your video…${
+                          job.render?.progress ? ` (${job.render.progress})` : ''
+                        }`}
+                  </p>
+                  <p className="animatics-hint">
+                    You can close this — the download link will be emailed to you when it&apos;s
+                    ready.
+                  </p>
+                </>
+              )}
+
+              {/* Done — show the link. */}
+              {job.status === 'RENDER_DONE' && (
+                <>
+                  <div className="animatics-check">✓</div>
+                  <p className="animatics-lead">
+                    Your video is ready{job.render?.emailed ? ' — the link was emailed to you' : ''}.
+                  </p>
+                  {job.render?.driveLink && (
+                    <a
+                      className="animatics-primary"
+                      href={job.render.driveLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ textDecoration: 'none', display: 'inline-block' }}
+                    >
+                      Open video in Google Drive
+                    </a>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
