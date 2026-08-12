@@ -447,7 +447,21 @@ function ChatView({
         {messages.map((m, i) => (
           <div className={`msg ${m.role}`} key={i}>
             <div className="role-label">{m.role === 'user' ? 'You' : 'Entwin'}</div>
-            <div className="bubble" style={m.error ? { color: '#e53935' } : undefined}>{m.text}</div>
+            <div className="bubble" style={m.error ? { color: '#e53935' } : undefined}>
+              {m.role === 'assistant' && !m.error ? (
+                <MarkdownAnswer
+                  text={m.text}
+                  cite={(n) => {
+                    const s = m.sources?.find((x) => x.n === n)
+                    return s
+                      ? { url: s.url, label: `${s.date || 'email'}${s.urgency ? ` · ${s.urgency}` : ''}` }
+                      : undefined
+                  }}
+                />
+              ) : (
+                m.text
+              )}
+            </div>
             {m.sources && m.sources.length > 0 && (
               <div className="msg-sources" style={{ marginTop: 6, fontSize: 12, opacity: 0.8, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {m.sources.map((s) => (
@@ -3845,70 +3859,131 @@ function refLabel(s: WikiSource): string {
   return parts.join(' · ')
 }
 
-// Strip light markdown to plain, readable text (headings, bold, italics,
-// bullets, code fences, links) while keeping [n] citation markers intact.
-function stripMarkup(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, '').trim()) // code fences
-    .replace(/`([^`]+)`/g, '$1')                                     // inline code
-    .replace(/^#{1,6}\s+/gm, '')                                     // headings
-    .replace(/\*\*([^*]+)\*\*/g, '$1')                               // bold
-    .replace(/(^|[^*])\*([^*]+)\*/g, '$1$2')                         // italics
-    .replace(/^\s*[-*+]\s+/gm, '• ')                                 // bullets
-    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '$1 ($2)')           // md links
-    .replace(/[ \t]+\n/g, '\n')
-    .trim()
+// ---------------------------------------------------------------------------
+// Lightweight Markdown → React renderer (dependency-free).
+//
+// The answer path deliberately preserves emphasis and structure now: the model
+// is instructed to lead with the most important item, bold the critical facts,
+// and format sets of items as bullet lists. Previously stripMarkup() deleted
+// all of that before render, so bold never reached the user. This renderer
+// keeps a safe subset — **bold**, *italic*, `code`, bullet/numbered lists, and
+// #/##/### headers — and threads inline [n] citations through as links.
+//
+// It is intentionally small and non-recursive: our answers are short prose +
+// lists, not arbitrary nested Markdown. Anything it doesn't recognise renders
+// as plain text, so it degrades gracefully.
+// ---------------------------------------------------------------------------
+type CiteLookup = (n: number) => { url: string | null; label: string } | undefined
+
+// Render a single line of inline Markdown (bold / italic / code) with [n]
+// citations woven in. Returns an array of React nodes.
+function renderInline(line: string, keyBase: string, cite?: CiteLookup): React.ReactNode[] {
+  const out: React.ReactNode[] = []
+  // Tokenise on the inline markers and citation refs in one pass. Order in the
+  // alternation matters: ** before *, so bold wins over italic.
+  const re = /(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(`([^`]+)`)|(\[(\d+)\])/g
+  let last = 0
+  let m: RegExpExecArray | null
+  let i = 0
+  while ((m = re.exec(line)) !== null) {
+    if (m.index > last) out.push(line.slice(last, m.index))
+    const key = `${keyBase}-i${i++}`
+    if (m[1]) {
+      out.push(<strong key={key}>{m[2]}</strong>)
+    } else if (m[3]) {
+      out.push(<em key={key}>{m[4]}</em>)
+    } else if (m[5]) {
+      out.push(<code key={key} className="memory-inline-code">{m[6]}</code>)
+    } else if (m[7]) {
+      const n = Number(m[8])
+      const src = cite?.(n)
+      if (src?.url) {
+        out.push(
+          <a key={key} className="memory-cite" href={src.url} target="_blank" rel="noopener noreferrer" title={src.label}>[{n}]</a>,
+        )
+      } else {
+        out.push(<sup key={key} className="memory-cite memory-cite-plain">[{n}]</sup>)
+      }
+    }
+    last = m.index + m[0].length
+  }
+  if (last < line.length) out.push(line.slice(last))
+  return out
+}
+
+// Full block-level renderer: splits into paragraphs, headers, and lists.
+function MarkdownAnswer({ text, cite }: { text: string; cite?: CiteLookup }) {
+  const clean = (text || '').replace(/```(\w+)?\n?/g, '').trim() // drop code fences, keep content
+  if (!clean) return <span className="memory-panel-loading">Nothing recorded yet.</span>
+
+  const blocks = clean.split(/\n{2,}/).map((b) => b.trim()).filter(Boolean)
+
+  return (
+    <>
+      {blocks.map((block, bi) => {
+        const lines = block.split(/\n/).map((l) => l.trimEnd()).filter(Boolean)
+
+        // Header block: a lone #/##/### line.
+        if (lines.length === 1) {
+          const h = lines[0].match(/^(#{1,3})\s+(.*)$/)
+          if (h) {
+            const level = h[1].length
+            const content = renderInline(h[2], `h${bi}`, cite)
+            if (level === 1) return <h3 className="memory-answer-h" key={bi}>{content}</h3>
+            if (level === 2) return <h4 className="memory-answer-h" key={bi}>{content}</h4>
+            return <h5 className="memory-answer-h" key={bi}>{content}</h5>
+          }
+        }
+
+        // Bulleted list: every line starts with -, *, or •.
+        const isBullet = lines.length > 0 && lines.every((l) => /^\s*[-*•]\s+/.test(l))
+        if (isBullet) {
+          return (
+            <ul className="memory-answer-list" key={bi}>
+              {lines.map((l, li) => (
+                <li key={li}>{renderInline(l.replace(/^\s*[-*•]\s+/, ''), `${bi}-${li}`, cite)}</li>
+              ))}
+            </ul>
+          )
+        }
+
+        // Numbered list: every line starts with "N.".
+        const isNumbered = lines.length > 0 && lines.every((l) => /^\s*\d+[.)]\s+/.test(l))
+        if (isNumbered) {
+          return (
+            <ol className="memory-answer-list" key={bi}>
+              {lines.map((l, li) => (
+                <li key={li}>{renderInline(l.replace(/^\s*\d+[.)]\s+/, ''), `${bi}-${li}`, cite)}</li>
+              ))}
+            </ol>
+          )
+        }
+
+        // Otherwise a paragraph. A leading bold-only line acts as a soft header.
+        return (
+          <p className="memory-answer-p" key={bi}>
+            {lines.map((l, li) => (
+              <span key={li}>
+                {renderInline(l, `${bi}-${li}`, cite)}
+                {li < lines.length - 1 ? <br /> : null}
+              </span>
+            ))}
+          </p>
+        )
+      })}
+    </>
+  )
 }
 
 // Renders answer as readable paragraphs; converts inline [n] into links that
 // open the matching reference in a new tab (or jump to it if it has no URL).
 function WikiAnswer({ answer, sources }: { answer: string; sources: WikiSource[] }) {
-  const clean = stripMarkup(answer)
   const byN = Object.fromEntries(sources.map((s) => [s.n, s]))
-  const paragraphs = clean.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean)
-
-  const renderWithCitations = (line: string, keyBase: string) => {
-    const out: React.ReactNode[] = []
-    const re = /\[(\d+)\]/g
-    let last = 0
-    let m: RegExpExecArray | null
-    let i = 0
-    while ((m = re.exec(line)) !== null) {
-      if (m.index > last) out.push(line.slice(last, m.index))
-      const n = Number(m[1])
-      const src = byN[n]
-      if (src?.url) {
-        out.push(
-          <a key={`${keyBase}-c${i}`} className="memory-cite" href={src.url} target="_blank" rel="noopener noreferrer" title={refLabel(src)}>[{n}]</a>
-        )
-      } else {
-        out.push(<sup key={`${keyBase}-c${i}`} className="memory-cite memory-cite-plain">[{n}]</sup>)
-      }
-      last = m.index + m[0].length
-      i++
-    }
-    if (last < line.length) out.push(line.slice(last))
-    return out
+  const cite: CiteLookup = (n) => {
+    const s = byN[n]
+    return s ? { url: s.url, label: refLabel(s) } : undefined
   }
-
-  if (!clean) return <span className="memory-panel-loading">Nothing recorded yet.</span>
-
-  return (
-    <>
-      {paragraphs.map((p, pi) => {
-        const lines = p.split(/\n/).filter(Boolean)
-        const isList = lines.every((l) => l.startsWith('• '))
-        if (isList) {
-          return (
-            <ul className="memory-answer-list" key={pi}>
-              {lines.map((l, li) => <li key={li}>{renderWithCitations(l.replace(/^•\s+/, ''), `${pi}-${li}`)}</li>)}
-            </ul>
-          )
-        }
-        return <p className="memory-answer-p" key={pi}>{renderWithCitations(p.replace(/\n/g, ' '), String(pi))}</p>
-      })}
-    </>
-  )
+  return <MarkdownAnswer text={answer} cite={cite} />
 }
 
 function MemoryGraph() {
