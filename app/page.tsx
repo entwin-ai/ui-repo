@@ -345,20 +345,33 @@ function newClientId(): string {
   return 'chat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
 }
 
+/** A historical conversation handed to ChatView so the user can pick it back up. */
+interface ResumeSession {
+  clientId: string
+  title: string
+  messages: ChatMsg[]
+  /** Bumped by the caller each time so the same session can be re-opened. */
+  nonce: number
+}
+
 function ChatView({
   currentModel,
   resetKey,
   onPersisted,
+  resumeSession,
 }: {
   currentModel: string
   resetKey: number
   onPersisted?: () => void
+  resumeSession?: ResumeSession | null
 }) {
   const GREETING =
     'Hi, I\u2019m Entwin. Ask me anything about your email \u2014 what\u2019s outstanding, who\u2019s waiting on you, upcoming payments or deadlines \u2014 and I\u2019ll answer from your vault.'
   const [messages, setMessages] = useState<ChatMsg[]>([{ role: 'assistant', text: GREETING }])
   const [value, setValue] = useState('')
   const [pending, setPending] = useState(false)
+  // Title of the conversation being continued, shown as a banner. Null for a fresh chat.
+  const [resumedTitle, setResumedTitle] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -368,9 +381,25 @@ function ChatView({
   useEffect(() => {
     if (resetKey > 0) {
       clientIdRef.current = newClientId()
+      setResumedTitle(null)
       setMessages([{ role: 'assistant', text: 'New chat started. What would you like to know?' }])
     }
   }, [resetKey])
+
+  // Load a historical conversation: reuse its clientId so new turns append to the
+  // same stored session, and render its messages so the user has full context.
+  useEffect(() => {
+    if (!resumeSession) return
+    clientIdRef.current = resumeSession.clientId
+    setResumedTitle(resumeSession.title)
+    setMessages(
+      resumeSession.messages.length > 0
+        ? resumeSession.messages
+        : [{ role: 'assistant', text: 'Continuing this chat. What would you like to know?' }],
+    )
+    setValue('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeSession?.nonce])
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
@@ -443,6 +472,17 @@ function ChatView({
 
   return (
     <>
+      {resumedTitle && (
+        <div className="chat-resume-banner">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+          <span>
+            Continuing <strong>{resumedTitle}</strong> \u2014 new messages are added to this conversation.
+          </span>
+        </div>
+      )}
       <div id="chat-messages" ref={listRef}>
         {messages.map((m, i) => (
           <div className={`msg ${m.role}`} key={i}>
@@ -4674,7 +4714,13 @@ function rangeSince(range: ChatDateRange, customStart: string): string | null {
   return null
 }
 
-function AllChatsView({ refreshKey }: { refreshKey: number }) {
+function AllChatsView({
+  refreshKey,
+  onContinue,
+}: {
+  refreshKey: number
+  onContinue?: (session: StoredChatSession) => void
+}) {
   const [query, setQuery] = useState('')
   const [range, setRange] = useState<ChatDateRange>('all')
   const [customStart, setCustomStart] = useState('')
@@ -4826,6 +4872,19 @@ function AllChatsView({ refreshKey }: { refreshKey: number }) {
 
                   {open && (
                     <div className="allchats-thread">
+                      {onContinue && (
+                        <div className="allchats-continue-row">
+                          <button
+                            className="allchats-continue-btn"
+                            onClick={() => onContinue(s)}
+                          >
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                            </svg>
+                            Continue this chat
+                          </button>
+                        </div>
+                      )}
                       {s.messages.map((m) => (
                         <div className={`msg ${m.role}`} key={m.id}>
                           <div className="role-label">
@@ -4899,6 +4958,22 @@ function AppShell() {
   const [view, setView] = useState<ViewKey>('chat')
   const [chatResetKey, setChatResetKey] = useState(0)
   const [allChatsRefresh, setAllChatsRefresh] = useState(0)
+  // A historical conversation the user chose to continue from "All chats".
+  const [resumeSession, setResumeSession] = useState<ResumeSession | null>(null)
+
+  // Load a stored conversation into the Chat tab and switch to it. Maps the
+  // persisted message shape to ChatView's ChatMsg shape and reuses the original
+  // clientId so replies append to the same session in the history store.
+  const continueChat = (s: StoredChatSession) => {
+    const msgs: ChatMsg[] = s.messages.map((m) => ({
+      role: m.role,
+      text: m.text,
+      sources: m.sources,
+      error: m.isError,
+    }))
+    setResumeSession({ clientId: s.clientId, title: s.title, messages: msgs, nonce: Date.now() })
+    setView('chat')
+  }
 
   // LLM label shown top-right on every tab. Reflects the user's configured
   // model, or prompts to set an API key when none is stored. Loaded on mount and
@@ -5433,7 +5508,7 @@ function AppShell() {
         </div>
 
         <div className="new-chat-wrap">
-          <button className="new-chat-btn" onClick={() => { setView('chat'); setChatResetKey((k) => k + 1) }}>
+          <button className="new-chat-btn" onClick={() => { setResumeSession(null); setView('chat'); setChatResetKey((k) => k + 1) }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
             <span className="label">New chat</span>
           </button>
@@ -5496,13 +5571,13 @@ function AppShell() {
                 : 'No model connected — set an API key in Settings'
             }</div></div>
           </div>
-          {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} onPersisted={() => setAllChatsRefresh((k) => k + 1)} />}
+          {view === 'chat' && <ChatView currentModel={currentModel} resetKey={chatResetKey} resumeSession={resumeSession} onPersisted={() => setAllChatsRefresh((k) => k + 1)} />}
         </div>
 
         {/* ALL CHATS */}
         <div className={`view${view === 'allchats' ? ' active' : ''}`} id="view-allchats">
           <div className="view-header">All chats<div className="sub">Every past Entwin conversation, searchable by text or date</div></div>
-          {view === 'allchats' && <AllChatsView refreshKey={allChatsRefresh} />}
+          {view === 'allchats' && <AllChatsView refreshKey={allChatsRefresh} onContinue={continueChat} />}
         </div>
 
         {/* CONNECTORS */}
