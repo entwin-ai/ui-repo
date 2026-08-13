@@ -2,7 +2,7 @@ import { getSupabaseAdmin } from './supabase'
 import { getLlmConfig } from './llm-keys'
 import { makeProvider } from './provider'
 import { hydrateNotes } from './hydrate'
-import { extractDateRange } from './date-range'
+import { extractDateRange, stripDateExpression } from './date-range'
 
 // How many of the top matched notes to hydrate with verbatim source excerpts.
 // Bounded so email bodies / conversation windows can't blow the context or cost;
@@ -77,6 +77,13 @@ export async function ask(
   const dateRange = extractDateRange(question)
   const isBounded = Boolean(dateRange.from || dateRange.to)
 
+  // Keyword-search text with the temporal expression removed. The window is now
+  // enforced exactly in SQL, so leaving relative words like "tomorrow" / "next
+  // week" in the keyword arm only causes false hits on historical notes that
+  // literally contain those words. The full question is still used for the
+  // semantic embedding above, so intent ("action items") is preserved.
+  const keywordText = stripDateExpression(question, dateRange)
+
   // When a window is applied, widen the candidate set: the window may legitimately
   // hold more than the default 15 relevant items, and we'd rather over-retrieve
   // within the bound than truncate it.
@@ -88,7 +95,7 @@ export async function ask(
   const { data: matches, error } = await getSupabaseAdmin().rpc('match_note_chunks_hybrid', {
     p_user_email: userEmail, // HARD user scope
     query_embedding: queryEmbedding,
-    p_query_text: question,
+    p_query_text: keywordText,
     match_count: matchCount,
     p_card_id: cardId,
     p_recency_boost: recencyBoost,

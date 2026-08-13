@@ -12,12 +12,27 @@ Three related fixes to the RAG answer path (`/api/ask`), addressing:
 
 ### 1. Date-range filtering (retrieval-level, not prompt-level)
 
-- **`lib/rag/date-range.ts`** (new) — dependency-free parser that extracts an
+- **`lib/rag/date-range.ts`** — dependency-free parser that extracts an
   explicit `{from, to}` window from the question. Handles `since`, `after`,
   `from`, `before`, `until`, `between … and …`, `in <month>`, `last/past N
-  days|weeks|months`, `this/last week|month`, `today`, `yesterday`, and ISO /
+  days|weeks|months`, `next/coming N days|weeks|months`, `this/last/next
+  week|month`, `this/next weekend`, `today`, `yesterday`, `tomorrow`, and ISO /
   `1st August` / `Aug 1 2025` date forms. Returns nulls when there's no bound,
   so unbounded queries behave exactly as before.
+
+  **Fix (relative-word keyword pollution):** previously `tomorrow` and
+  `next week` were not recognised at all, so no window was applied and the raw
+  word flowed into the keyword-search arm — retrieving every historical note
+  that literally contained "tomorrow"/"yesterday". Two changes fix this:
+  (a) future-relative expressions (`tomorrow`, `next week`, `next month`,
+  `next N days/weeks/months`, `this/next weekend`) are now parsed into
+  `now±offset` windows; and (b) the parser returns `matched` — the exact
+  temporal substring — and `stripDateExpression()` removes it from the text
+  handed to the keyword search. The full question is still embedded for the
+  semantic arm, so intent ("action items") is preserved while the date word no
+  longer keyword-matches. This also closes the same latent leak for the
+  already-supported words (`yesterday`, `last week`, `since 1st August` …),
+  which were being scoped correctly but still polluting the keyword arm.
 - **`supabase/migrations/0026_match_hybrid_date_range.sql`** (new) — adds two
   nullable params `p_date_from` / `p_date_to` to `match_note_chunks_hybrid` and
   filters `memory_note.note_date` in SQL. Out-of-window notes are excluded
